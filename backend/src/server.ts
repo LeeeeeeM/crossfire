@@ -95,6 +95,7 @@ type RoomPlayer = {
   deaths: number;
   input: InputState;
   lastInputAt: number;
+  lastProcessedInputSeq: number;
 };
 
 type Bullet = {
@@ -257,7 +258,8 @@ function playersPayload() {
     respawnAt: p.respawnAt,
     cooldown: p.cooldown,
     prevShoot: p.prevShoot,
-    deaths: p.deaths
+    deaths: p.deaths,
+    lastProcessedInputSeq: p.lastProcessedInputSeq
   }));
 }
 
@@ -349,7 +351,8 @@ function attachAuthedConnection(ws: ServerWebSocket<WsData>, playerKey: string, 
       prevShoot: false,
       deaths: 0,
       input: defaultInput(),
-      lastInputAt: Date.now()
+      lastInputAt: Date.now(),
+      lastProcessedInputSeq: 0
     };
     players.set(playerKey, player);
   }
@@ -525,6 +528,9 @@ const server = Bun.serve<WsData>({
       if (!p) return;
 
       if (msg?.type === "input") {
+        const seq = Number(msg.seq || 0);
+        if (!Number.isFinite(seq) || seq <= p.lastProcessedInputSeq) return;
+
         p.input = {
           up: !!msg.up,
           down: !!msg.down,
@@ -535,6 +541,7 @@ const server = Bun.serve<WsData>({
           aimY: Number(msg.aimY || 0)
         };
         p.lastInputAt = Date.now();
+        p.lastProcessedInputSeq = seq;
       }
     },
     close(ws) {

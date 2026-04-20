@@ -1,6 +1,6 @@
 import type { Evolution } from "./types";
 
-const API = "http://localhost:8787";
+const API = "";
 export const AUTH_TOKEN_STORAGE = "sync_auth_token";
 
 export async function fetchEvolutions(): Promise<Evolution[]> {

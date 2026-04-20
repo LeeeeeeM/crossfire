@@ -25,6 +25,7 @@ type Player = {
   cooldown: number;
   prevShoot: boolean;
   deaths: number;
+  lastProcessedInputSeq: number;
 };
 
 type Bullet = {
@@ -58,6 +59,7 @@ const PLAYER_R = 14;
 const MAX_HP = 90;
 const MOVE_PER_FRAME = 5;
 const DEFAULT_TICK_MS = 50;
+const MAX_PENDING_INPUTS = 200;
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -99,6 +101,8 @@ export default function LockstepArenaPage() {
   const fpsCounterRef = useRef({ lastTs: 0, frames: 0 });
   const tickMsRef = useRef(DEFAULT_TICK_MS);
   const predictedSelfRef = useRef<{ x: number; y: number; dir: number; lastTs: number } | null>(null);
+  const inputSeqRef = useRef(0);
+  const pendingInputsRef = useRef<Array<{ seq: number; input: NetInput }>>([]);
 
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("连接中...");
@@ -112,6 +116,20 @@ export default function LockstepArenaPage() {
   const [authToken, setAuthToken] = useState("");
   const [authUser, setAuthUser] = useState<{ id: string; username: string } | null>(null);
   const [canControl, setCanControl] = useState(true);
+
+  const queueAndSendInput = () => {
+    const liveWs = wsRef.current;
+    if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
+
+    const seq = ++inputSeqRef.current;
+    const input: NetInput = { ...inputRef.current };
+    pendingInputsRef.current.push({ seq, input });
+    if (pendingInputsRef.current.length > MAX_PENDING_INPUTS) {
+      pendingInputsRef.current.splice(0, pendingInputsRef.current.length - MAX_PENDING_INPUTS);
+    }
+    setQueueLen(pendingInputsRef.current.length);
+    liveWs.send(JSON.stringify({ type: "input", seq, ...input }));
+  };
 
   useEffect(() => {
     const resizeCanvas = () => {
@@ -172,7 +190,8 @@ export default function LockstepArenaPage() {
     if (!authUser || !authToken) return;
 
     setStatus(`连接中，账号: ${authUser.username}`);
-    const ws = new WebSocket(`ws://localhost:8787/ws/lockstep?token=${encodeURIComponent(authToken)}`);
+    const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${wsProto}://${window.location.host}/ws/lockstep?token=${encodeURIComponent(authToken)}`);
     wsRef.current = ws;
 
     const applyState = (msg: any) => {
@@ -196,7 +215,8 @@ export default function LockstepArenaPage() {
           respawnAt: Number(p.respawnAt || 0),
           cooldown: Number(p.cooldown || 0),
           prevShoot: !!p.prevShoot,
-          deaths: Number(p.deaths || 0)
+          deaths: Number(p.deaths || 0),
+          lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0)
         });
       }
 
@@ -209,27 +229,33 @@ export default function LockstepArenaPage() {
       setLocalFrame(f);
       setServerFrame(f);
       setPlayerCount(next.size);
-      setQueueLen(0);
       setLatencyMs(Math.max(0, Date.now() - Number(msg.serverTime || Date.now())));
 
       const self = next.get(selfIdRef.current);
       if (self) {
+        const ackSeq = self.lastProcessedInputSeq || 0;
+        pendingInputsRef.current = pendingInputsRef.current.filter((item) => item.seq > ackSeq);
         const now = performance.now();
         const pred = predictedSelfRef.current;
         if (!pred) {
           predictedSelfRef.current = { x: self.x, y: self.y, dir: self.dir, lastTs: now };
         } else {
           const d = Math.hypot(pred.x - self.x, pred.y - self.y);
-          if (!self.alive || d > 30) {
+          if (!self.alive || d > 80) {
             pred.x = self.x;
             pred.y = self.y;
           } else {
-            pred.x += (self.x - pred.x) * 0.35;
-            pred.y += (self.y - pred.y) * 0.35;
+            pred.x += (self.x - pred.x) * 0.2;
+            pred.y += (self.y - pred.y) * 0.2;
           }
-          pred.dir += normalizeAngle(self.dir - pred.dir) * 0.35;
+          pred.dir += normalizeAngle(self.dir - pred.dir) * 0.25;
           pred.lastTs = now;
         }
+        setQueueLen(pendingInputsRef.current.length);
+      } else {
+        pendingInputsRef.current = [];
+        predictedSelfRef.current = null;
+        setQueueLen(0);
       }
     };
 
@@ -238,6 +264,10 @@ export default function LockstepArenaPage() {
       setStatus(`已连接，账号: ${authUser.username}`);
       ws.send(JSON.stringify({ type: "auth", playerKey: `u_${authUser.id}`, playerName: authUser.username }));
       tickMsRef.current = DEFAULT_TICK_MS;
+      inputSeqRef.current = 0;
+      pendingInputsRef.current = [];
+      predictedSelfRef.current = null;
+      setQueueLen(0);
     };
 
     ws.onclose = () => {
@@ -286,11 +316,9 @@ export default function LockstepArenaPage() {
 
   useEffect(() => {
     const iv = setInterval(() => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!canControlRef.current) return;
-      ws.send(JSON.stringify({ type: "input", ...inputRef.current }));
-    }, 33);
+      queueAndSendInput();
+    }, 50);
     return () => clearInterval(iv);
   }, []);
 
@@ -309,7 +337,7 @@ export default function LockstepArenaPage() {
 
         const ws = wsRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "input", ...inputRef.current }));
+          queueAndSendInput();
         }
       }
     };
@@ -461,7 +489,7 @@ export default function LockstepArenaPage() {
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(drawX, drawY);
-        ctx.lineTo(drawX + Math.cos(drawDir) * 20, drawY + Math.sin(drawDir) * 20);
+        ctx.lineTo(drawX + Math.cos(normalizeAngle(drawDir)) * 20, drawY + Math.sin(normalizeAngle(drawDir)) * 20);
         ctx.stroke();
 
         ctx.globalAlpha = 1;
