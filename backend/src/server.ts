@@ -116,15 +116,22 @@ type Explosion = {
 
 type Obstacle = { x: number; y: number; w: number; h: number };
 
+type RoomStatus = "idle" | "waiting" | "started";
+
 type WsData = {
   connId: string;
   playerKey: string;
   playerName: string;
   authed: boolean;
+  manualLeave: boolean;
 };
 
+function createWsData(connId: string, playerKey: string, playerName: string): WsData {
+  return { connId, playerKey, playerName, authed: false, manualLeave: false };
+}
+
 function ensureWsData(ws: ServerWebSocket<WsData>) {
-  ws.data ??= { connId: "", playerKey: "", playerName: "", authed: false };
+  ws.data ??= createWsData("", "", "");
   return ws.data;
 }
 
@@ -150,6 +157,10 @@ const COLORS = ["#2f7bd9", "#e06c4e", "#22a67a", "#ab54d1", "#c19434"];
 let idSeq = 1;
 let bulletSeq = 1;
 let frame = 0;
+let roomId = "";
+let roomOwnerKey = "";
+let roomStatus: RoomStatus = "idle";
+
 const clients = new Map<string, ServerWebSocket<WsData>>();
 const players = new Map<string, RoomPlayer>();
 const connToPlayer = new Map<string, string>();
@@ -245,6 +256,17 @@ function spawnFor(player: RoomPlayer) {
   return SPAWNS[idx];
 }
 
+function roomInfo() {
+  if (roomStatus === "idle" || !roomId) return null;
+  return {
+    id: roomId,
+    ownerKey: roomOwnerKey,
+    status: roomStatus,
+    playerCount: players.size,
+    maxPlayers: MAX_PLAYERS
+  };
+}
+
 function playersPayload() {
   return Array.from(players.values()).map((p) => ({
     id: p.id,
@@ -269,6 +291,7 @@ function statePayload(type: "state" | "snapshot", reason?: string) {
     reason,
     frame,
     serverTime: Date.now(),
+    room: roomInfo(),
     world: { width: WORLD_WIDTH, height: WORLD_HEIGHT, obstacles: OBSTACLES },
     players: playersPayload(),
     bullets,
@@ -276,27 +299,38 @@ function statePayload(type: "state" | "snapshot", reason?: string) {
   };
 }
 
-function broadcast(data: unknown) {
-  const text = JSON.stringify(data);
-  for (const ws of clients.values()) ws.send(text);
-}
-
-function sendTo(id: string, data: unknown) {
-  const ws = clients.get(id);
+function sendTo(connId: string, data: unknown) {
+  const ws = clients.get(connId);
   if (!ws) return;
   ws.send(JSON.stringify(data));
 }
 
-function broadcastSnapshot(reason: string) {
-  broadcast(statePayload("snapshot", reason));
+function broadcastToRoom(data: unknown) {
+  if (roomStatus === "idle") return;
+  const text = JSON.stringify(data);
+  for (const ws of clients.values()) {
+    if (!ws.data.authed) continue;
+    const key = ws.data.playerKey;
+    if (!key) continue;
+    if (players.has(key)) ws.send(text);
+  }
 }
 
-function removePlayer(playerKey: string, reason: string) {
-  const existed = players.delete(playerKey);
-  offlineDeadlines.delete(playerKey);
-  if (!existed) return;
-  bullets = bullets.filter((b) => b.owner !== playerKey);
-  broadcastSnapshot(reason);
+function sendLobbyState(connId: string) {
+  sendTo(connId, { type: "lobby_state", room: roomInfo() });
+}
+
+function broadcastLobbyState() {
+  const text = JSON.stringify({ type: "lobby_state", room: roomInfo() });
+  for (const ws of clients.values()) {
+    if (!ws.data.authed) continue;
+    ws.send(text);
+  }
+}
+
+function broadcastSnapshot(reason: string) {
+  broadcastToRoom(statePayload("snapshot", reason));
+  broadcastLobbyState();
 }
 
 function pickAvailableColor() {
@@ -307,69 +341,150 @@ function pickAvailableColor() {
   return COLORS[players.size % COLORS.length];
 }
 
-function attachAuthedConnection(ws: ServerWebSocket<WsData>, playerKey: string, playerName: string) {
-  const connId = ws.data.connId;
-  ws.data.playerKey = playerKey;
-  ws.data.playerName = playerName;
-  ws.data.authed = true;
-  connToPlayer.set(connId, playerKey);
+function createPlayer(playerKey: string, playerName: string) {
+  const spawn = SPAWNS[players.size % SPAWNS.length];
+  return {
+    id: playerKey,
+    name: playerName,
+    color: pickAvailableColor(),
+    x: spawn.x,
+    y: spawn.y,
+    hp: MAX_HP,
+    dir: 0,
+    alive: true,
+    respawnAt: 0,
+    cooldown: 0,
+    prevShoot: false,
+    deaths: 0,
+    input: defaultInput(),
+    lastInputAt: Date.now(),
+    lastProcessedInputSeq: 0
+  } as RoomPlayer;
+}
 
+function maybeResetRoomAfterEmpty() {
+  if (players.size > 0) return;
+  roomId = "";
+  roomOwnerKey = "";
+  roomStatus = "idle";
+  frame = 0;
+  bullets = [];
+  explosions = [];
+  offlineDeadlines.clear();
+  broadcastLobbyState();
+}
+
+function removePlayer(playerKey: string, reason: string) {
+  const existed = players.delete(playerKey);
+  offlineDeadlines.delete(playerKey);
+  if (!existed) return;
+
+  bullets = bullets.filter((b) => b.owner !== playerKey);
+
+  if (roomOwnerKey === playerKey) {
+    const nextOwner = Array.from(players.keys()).sort()[0] || "";
+    roomOwnerKey = nextOwner;
+  }
+
+  if (players.size === 0) {
+    maybeResetRoomAfterEmpty();
+    return;
+  }
+
+  broadcastSnapshot(reason);
+}
+
+function ensureConnectionMaps(playerKey: string, connId: string) {
+  connToPlayer.set(connId, playerKey);
   let connSet = playerToConns.get(playerKey);
   if (!connSet) {
     connSet = new Set<string>();
     playerToConns.set(playerKey, connSet);
   }
   connSet.add(connId);
-  offlineDeadlines.delete(playerKey);
+}
 
-  let player = players.get(playerKey);
-  const isNewLogicalPlayer = !player;
-
-  if (isNewLogicalPlayer && players.size >= MAX_PLAYERS) {
-    ws.send(JSON.stringify({ type: "reject", reason: "room_full", maxPlayers: MAX_PLAYERS }));
-    connSet.delete(connId);
-    if (connSet.size === 0) playerToConns.delete(playerKey);
-    connToPlayer.delete(connId);
-    ws.data.authed = false;
-    ws.close();
-    return;
-  }
-
-  if (!player) {
-    const spawn = SPAWNS[players.size % SPAWNS.length];
-    player = {
-      id: playerKey,
-      name: playerName,
-      color: pickAvailableColor(),
-      x: spawn.x,
-      y: spawn.y,
-      hp: MAX_HP,
-      dir: 0,
-      alive: true,
-      respawnAt: 0,
-      cooldown: 0,
-      prevShoot: false,
-      deaths: 0,
-      input: defaultInput(),
-      lastInputAt: Date.now(),
-      lastProcessedInputSeq: 0
-    };
-    players.set(playerKey, player);
-  }
-
+function sendWelcome(connId: string, playerKey: string, reason: string) {
   sendTo(connId, {
     type: "welcome",
     id: playerKey,
     connId,
     maxPlayers: MAX_PLAYERS,
     tickMs: TICK_MS,
-    snapshot: statePayload("snapshot", isNewLogicalPlayer ? "new_player_join" : "existing_player_attach")
+    snapshot: statePayload("snapshot", reason)
   });
+}
 
-  if (isNewLogicalPlayer) broadcastSnapshot(`player_join_${playerKey}`);
+function attachAuthedConnection(ws: ServerWebSocket<WsData>, playerKey: string, playerName: string) {
+  const connId = ws.data.connId;
+  ws.data.playerKey = playerKey;
+  ws.data.playerName = playerName;
+  ws.data.authed = true;
+  ws.data.manualLeave = false;
+
+  ensureConnectionMaps(playerKey, connId);
+
+  if (players.has(playerKey)) {
+    offlineDeadlines.delete(playerKey);
+    sendWelcome(connId, playerKey, "existing_player_attach");
+    return;
+  }
+
+  sendLobbyState(connId);
+}
+
+function createRoom(ownerKey: string) {
+  roomId = Math.random().toString(36).slice(2, 8).toUpperCase();
+  roomOwnerKey = ownerKey;
+  roomStatus = "waiting";
+  frame = 0;
+  bullets = [];
+  explosions = [];
+}
+
+function addPlayerToRoom(playerKey: string, playerName: string) {
+  const existing = players.get(playerKey);
+  if (existing) return existing;
+  if (roomStatus === "idle") return null;
+  if (players.size >= MAX_PLAYERS) return null;
+
+  const p = createPlayer(playerKey, playerName);
+  players.set(playerKey, p);
+  offlineDeadlines.delete(playerKey);
+  return p;
+}
+
+function startRoomBy(ownerKey: string) {
+  if (roomStatus !== "waiting") return { ok: false, reason: "already_started" };
+  if (roomOwnerKey !== ownerKey) return { ok: false, reason: "not_owner" };
+  if (players.size < 1) return { ok: false, reason: "empty_room" };
+
+  roomStatus = "started";
+  frame = 0;
+  bullets = [];
+  explosions = [];
+
+  for (const p of players.values()) {
+    p.hp = MAX_HP;
+    p.alive = true;
+    p.respawnAt = 0;
+    p.cooldown = 0;
+    p.prevShoot = false;
+    p.deaths = 0;
+    p.input = defaultInput();
+    p.lastInputAt = Date.now();
+    const s = spawnFor(p);
+    p.x = s.x;
+    p.y = s.y;
+  }
+
+  broadcastSnapshot("game_started");
+  return { ok: true };
 }
 
 setInterval(() => {
+  if (roomStatus !== "started") return;
+
   frame += 1;
 
   const now = Date.now();
@@ -378,6 +493,7 @@ setInterval(() => {
       removePlayer(playerKey, `player_timeout_${playerKey}`);
     }
   }
+
   const ids = Array.from(players.keys()).sort();
 
   for (const id of ids) {
@@ -484,7 +600,7 @@ setInterval(() => {
 
   explosions = explosions.filter((e) => frame - e.born <= 15);
 
-  broadcast(statePayload("state"));
+  broadcastToRoom(statePayload("state"));
 }, TICK_MS);
 
 const server = Bun.serve<WsData>({
@@ -524,10 +640,83 @@ const server = Bun.serve<WsData>({
         return;
       }
 
-      const p = players.get(wsData.playerKey);
-      if (!p) return;
+      const playerKey = wsData.playerKey;
+      const playerName = wsData.playerName;
+      if (!playerKey) return;
+
+      if (msg?.type === "create_room") {
+        if (players.has(playerKey)) {
+          ws.send(JSON.stringify({ type: "reject", reason: "already_in_room" }));
+          return;
+        }
+        if (roomStatus !== "idle") {
+          ws.send(JSON.stringify({ type: "reject", reason: "room_exists" }));
+          sendLobbyState(wsData.connId);
+          return;
+        }
+
+        createRoom(playerKey);
+        const p = addPlayerToRoom(playerKey, playerName);
+        if (!p) {
+          ws.send(JSON.stringify({ type: "reject", reason: "room_join_failed" }));
+          return;
+        }
+
+        sendWelcome(wsData.connId, playerKey, "room_created");
+        broadcastSnapshot(`player_join_${playerKey}`);
+        return;
+      }
+
+      if (msg?.type === "join_room") {
+        const reqRoomId = String(msg.roomId || "").trim();
+        if (roomStatus === "idle" || !roomId || roomId !== reqRoomId) {
+          ws.send(JSON.stringify({ type: "reject", reason: "room_not_found" }));
+          sendLobbyState(wsData.connId);
+          return;
+        }
+
+        if (players.has(playerKey)) {
+          sendWelcome(wsData.connId, playerKey, "existing_player_attach");
+          return;
+        }
+
+        if (players.size >= MAX_PLAYERS) {
+          ws.send(JSON.stringify({ type: "reject", reason: "room_full", maxPlayers: MAX_PLAYERS }));
+          return;
+        }
+
+        const p = addPlayerToRoom(playerKey, playerName);
+        if (!p) {
+          ws.send(JSON.stringify({ type: "reject", reason: "room_join_failed" }));
+          return;
+        }
+
+        sendWelcome(wsData.connId, playerKey, "new_player_join");
+        broadcastSnapshot(`player_join_${playerKey}`);
+        return;
+      }
+
+      if (msg?.type === "start_game") {
+        const ret = startRoomBy(playerKey);
+        if (!ret.ok) ws.send(JSON.stringify({ type: "reject", reason: ret.reason }));
+        return;
+      }
+
+      const p = players.get(playerKey);
+      if (!p) {
+        if (msg?.type === "list_rooms") sendLobbyState(wsData.connId);
+        return;
+      }
+
+      if (msg?.type === "leave") {
+        removePlayer(playerKey, `player_leave_${playerKey}`);
+        sendLobbyState(wsData.connId);
+        return;
+      }
 
       if (msg?.type === "input") {
+        if (roomStatus !== "started") return;
+
         const seq = Number(msg.seq || 0);
         if (!Number.isFinite(seq) || seq <= p.lastProcessedInputSeq) return;
 
@@ -550,14 +739,17 @@ const server = Bun.serve<WsData>({
       if (!authed) return;
 
       connToPlayer.delete(connId);
+
       const connSet = playerToConns.get(playerKey);
       if (!connSet) return;
       connSet.delete(connId);
       if (connSet.size > 0) return;
-
       playerToConns.delete(playerKey);
-      offlineDeadlines.set(playerKey, Date.now() + RECONNECT_GRACE_MS);
-      broadcastSnapshot(`player_offline_${playerKey}`);
+
+      if (players.has(playerKey)) {
+        offlineDeadlines.set(playerKey, Date.now() + RECONNECT_GRACE_MS);
+        broadcastSnapshot(`player_offline_${playerKey}`);
+      }
     }
   },
   async fetch(req) {
@@ -658,7 +850,7 @@ const server = Bun.serve<WsData>({
 
       const ok = (req.headers.get("upgrade") || "").toLowerCase() === "websocket";
       if (!ok) return json({ error: "upgrade_required" }, { status: 426 });
-      const upgraded = server.upgrade(req, { data: { connId, playerKey, playerName, authed: false } });
+      const upgraded = server.upgrade(req, { data: createWsData(connId, playerKey, playerName) });
       if (upgraded) return undefined as any;
       return json({ error: "upgrade_failed" }, { status: 400 });
     }

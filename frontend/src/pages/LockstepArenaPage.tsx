@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { authMe, AUTH_TOKEN_STORAGE } from "../api";
 
 type NetInput = {
@@ -52,6 +52,14 @@ type World = {
   obstacles: Obstacle[];
 };
 
+type RoomMeta = {
+  id: string;
+  ownerKey: string;
+  status: "idle" | "waiting" | "started";
+  playerCount: number;
+  maxPlayers: number;
+};
+
 const VIEW_W = 980;
 const VIEW_H = 620;
 const VIEW_ASPECT = VIEW_W / VIEW_H;
@@ -85,7 +93,20 @@ function collisionAt(x: number, y: number, world: World) {
   return world.obstacles.some((ob) => circleRectHit(x, y, PLAYER_R, ob));
 }
 
+function parseRoom(raw: any): RoomMeta | null {
+  if (!raw?.room || !raw.room.id) return null;
+  return {
+    id: String(raw.room.id),
+    ownerKey: String(raw.room.ownerKey || ""),
+    status: raw.room.status === "started" ? "started" : raw.room.status === "waiting" ? "waiting" : "idle",
+    playerCount: Number(raw.room.playerCount || 0),
+    maxPlayers: Number(raw.room.maxPlayers || 5)
+  };
+}
+
 export default function LockstepArenaPage() {
+  const navigate = useNavigate();
+
   const arenaWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -103,6 +124,8 @@ export default function LockstepArenaPage() {
   const predictedSelfRef = useRef<{ x: number; y: number; dir: number; lastTs: number } | null>(null);
   const inputSeqRef = useRef(0);
   const pendingInputsRef = useRef<Array<{ seq: number; input: NetInput }>>([]);
+  const aimInitializedRef = useRef(false);
+  const roomMetaRef = useRef<RoomMeta | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("连接中...");
@@ -116,8 +139,55 @@ export default function LockstepArenaPage() {
   const [authToken, setAuthToken] = useState("");
   const [authUser, setAuthUser] = useState<{ id: string; username: string } | null>(null);
   const [canControl, setCanControl] = useState(true);
+  const [roomList, setRoomList] = useState<RoomMeta[]>([]);
+  const [roomMeta, setRoomMeta] = useState<RoomMeta | null>(null);
+  const [countdown, setCountdown] = useState<number>(0);
+
+  const debugEnabled = useMemo(() => {
+    try {
+      const v = new URLSearchParams(window.location.search).get("debug");
+      if (!v) return false;
+      return v === "1" || v.toLowerCase() === "true" || v.toLowerCase() === "on";
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const clearLocalRoomState = () => {
+    playersRef.current = new Map();
+    bulletsRef.current = [];
+    explosionsRef.current = [];
+    selfIdRef.current = "";
+    predictedSelfRef.current = null;
+    pendingInputsRef.current = [];
+    inputSeqRef.current = 0;
+    aimInitializedRef.current = false;
+    inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, aimX: 0, aimY: 0 };
+    setPlayerCount(0);
+    setQueueLen(0);
+    setLatencyMs(0);
+    setServerFrame(0);
+    setLocalFrame(0);
+  };
+
+  const inRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
+  const inWaitingRoom = inRoom && roomMeta?.status === "waiting";
+  const inStartedRoom = inRoom && roomMeta?.status === "started";
+  const isOwner = !!roomMeta && roomMeta.ownerKey === selfIdRef.current;
+  const canStartGame = !!roomMeta && roomMeta.status === "waiting" && isOwner && roomMeta.playerCount >= 1;
+  const showGame = inStartedRoom;
+
+  const sendWs = (payload: any) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(payload));
+    return true;
+  };
 
   const queueAndSendInput = () => {
+    if (!showGame || countdown > 0) return;
+    if (!selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
+
     const liveWs = wsRef.current;
     if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
 
@@ -158,7 +228,8 @@ export default function LockstepArenaPage() {
     const token = localStorage.getItem(AUTH_TOKEN_STORAGE) || "";
     if (!token) {
       setAuthChecking(false);
-      setStatus("未登录，请先注册/登录");
+      setAuthToken("");
+      setAuthUser(null);
       return;
     }
 
@@ -175,7 +246,6 @@ export default function LockstepArenaPage() {
         localStorage.removeItem(AUTH_TOKEN_STORAGE);
         setAuthToken("");
         setAuthUser(null);
-        setStatus("登录已失效，请重新登录");
       })
       .finally(() => {
         if (!cancelled) setAuthChecking(false);
@@ -189,13 +259,22 @@ export default function LockstepArenaPage() {
   useEffect(() => {
     if (!authUser || !authToken) return;
 
-    setStatus(`连接中，账号: ${authUser.username}`);
     const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${wsProto}://${window.location.host}/ws/lockstep?token=${encodeURIComponent(authToken)}`);
     wsRef.current = ws;
+    setStatus(`连接中，账号: ${authUser.username}`);
+
+    const updateRoomMeta = (next: RoomMeta | null) => {
+      roomMetaRef.current = next;
+      setRoomMeta(next);
+      setRoomList(next ? [next] : []);
+    };
 
     const applyState = (msg: any) => {
       if (!Array.isArray(msg?.players)) return;
+
+      const nextRoom = parseRoom(msg);
+      updateRoomMeta(nextRoom);
 
       if (msg.world && Array.isArray(msg.world.obstacles)) {
         worldRef.current = msg.world;
@@ -233,8 +312,16 @@ export default function LockstepArenaPage() {
 
       const self = next.get(selfIdRef.current);
       if (self) {
+        if (!aimInitializedRef.current) {
+          inputRef.current.aimX = self.x + Math.cos(self.dir) * 120;
+          inputRef.current.aimY = self.y + Math.sin(self.dir) * 120;
+          aimInitializedRef.current = true;
+        }
+
         const ackSeq = self.lastProcessedInputSeq || 0;
+        inputSeqRef.current = Math.max(inputSeqRef.current, ackSeq);
         pendingInputsRef.current = pendingInputsRef.current.filter((item) => item.seq > ackSeq);
+
         const now = performance.now();
         const pred = predictedSelfRef.current;
         if (!pred) {
@@ -251,17 +338,22 @@ export default function LockstepArenaPage() {
           pred.dir += normalizeAngle(self.dir - pred.dir) * 0.25;
           pred.lastTs = now;
         }
+
         setQueueLen(pendingInputsRef.current.length);
       } else {
         pendingInputsRef.current = [];
         predictedSelfRef.current = null;
+        aimInitializedRef.current = false;
         setQueueLen(0);
+      }
+
+      if (msg.reason === "game_started") {
+        setCountdown(3);
       }
     };
 
     ws.onopen = () => {
       setConnected(true);
-      setStatus(`已连接，账号: ${authUser.username}`);
       ws.send(JSON.stringify({ type: "auth", playerKey: `u_${authUser.id}`, playerName: authUser.username }));
       tickMsRef.current = DEFAULT_TICK_MS;
       inputSeqRef.current = 0;
@@ -289,7 +381,15 @@ export default function LockstepArenaPage() {
       }
 
       if (msg.type === "reject") {
-        setStatus(msg.reason === "room_full" ? "房间已满（最多 5 人）" : `连接被拒绝: ${msg.reason || "unknown"}`);
+        const reasonMap: Record<string, string> = {
+          room_full: "房间已满（最多 5 人）",
+          room_exists: "已有房间，请加入当前房间",
+          room_not_found: "房间不存在",
+          not_owner: "只有房主可以开始",
+          already_started: "游戏已开始",
+          already_in_room: "你已在房间中"
+        };
+        setStatus(reasonMap[msg.reason] || `请求被拒绝: ${msg.reason || "unknown"}`);
         return;
       }
 
@@ -302,7 +402,20 @@ export default function LockstepArenaPage() {
         selfIdRef.current = msg.id;
         tickMsRef.current = Number(msg.tickMs || DEFAULT_TICK_MS);
         applyState(msg.snapshot);
-        setStatus(`已加入，ID: ${msg.id}`);
+        const started = msg?.snapshot?.room?.status === "started";
+        setStatus(started ? "游戏开始" : "已加入房间，等待开始");
+        return;
+      }
+
+      if (msg.type === "lobby_state") {
+        const nextRoom = parseRoom(msg);
+        updateRoomMeta(nextRoom);
+        const currentlyInRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
+        const sameRoom = !!nextRoom && !!roomMetaRef.current && nextRoom.id === roomMetaRef.current.id;
+        if (!currentlyInRoom || !sameRoom) {
+          clearLocalRoomState();
+          setStatus(nextRoom ? `大厅：房间 ${nextRoom.id} (${nextRoom.playerCount}/${nextRoom.maxPlayers})` : "大厅：暂无房间");
+        }
         return;
       }
 
@@ -315,12 +428,20 @@ export default function LockstepArenaPage() {
   }, [authToken, authUser]);
 
   useEffect(() => {
+    if (countdown <= 0) return;
+    const iv = setInterval(() => {
+      setCountdown((c) => (c <= 1 ? 0 : c - 1));
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [countdown]);
+
+  useEffect(() => {
     const iv = setInterval(() => {
       if (!canControlRef.current) return;
       queueAndSendInput();
     }, 50);
     return () => clearInterval(iv);
-  }, []);
+  }, [countdown, showGame]);
 
   useEffect(() => {
     const updateControl = () => {
@@ -334,11 +455,7 @@ export default function LockstepArenaPage() {
         inputRef.current.left = false;
         inputRef.current.right = false;
         inputRef.current.shoot = false;
-
-        const ws = wsRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          queueAndSendInput();
-        }
+        if (showGame) queueAndSendInput();
       }
     };
 
@@ -352,7 +469,7 @@ export default function LockstepArenaPage() {
       window.removeEventListener("blur", updateControl);
       document.removeEventListener("visibilitychange", updateControl);
     };
-  }, []);
+  }, [showGame]);
 
   useEffect(() => {
     let raf = 0;
@@ -391,7 +508,7 @@ export default function LockstepArenaPage() {
       const sy = canvas.height / Math.max(view.h, 1);
       ctx.setTransform(sx, 0, 0, sy, 0, 0);
 
-      if (predSelf && self && self.alive && canControlRef.current) {
+      if (predSelf && self && self.alive && canControlRef.current && showGame && countdown === 0) {
         const now = performance.now();
         const dt = clamp(now - predSelf.lastTs, 0, tickMsRef.current);
         predSelf.lastTs = now;
@@ -468,10 +585,10 @@ export default function LockstepArenaPage() {
       }
 
       for (const p of players.values()) {
-        const isSelf = p.id === selfIdRef.current;
-        const drawX = isSelf && predSelf ? predSelf.x : p.x;
-        const drawY = isSelf && predSelf ? predSelf.y : p.y;
-        const drawDir = isSelf && predSelf ? predSelf.dir : p.dir;
+        const isSelfPlayer = p.id === selfIdRef.current;
+        const drawX = isSelfPlayer && predSelf ? predSelf.x : p.x;
+        const drawY = isSelfPlayer && predSelf ? predSelf.y : p.y;
+        const drawDir = isSelfPlayer && predSelf ? predSelf.dir : p.dir;
         const alpha = p.alive ? 1 : 0.3;
         ctx.globalAlpha = alpha;
 
@@ -528,16 +645,19 @@ export default function LockstepArenaPage() {
 
     raf = requestAnimationFrame(render);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [countdown, showGame]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (!authUser || !showGame || countdown > 0) return;
       if (e.key === "w" || e.key === "W") inputRef.current.up = true;
       if (e.key === "s" || e.key === "S") inputRef.current.down = true;
       if (e.key === "a" || e.key === "A") inputRef.current.left = true;
       if (e.key === "d" || e.key === "D") inputRef.current.right = true;
     };
+
     const onKeyUp = (e: KeyboardEvent) => {
+      if (!authUser || !showGame) return;
       if (e.key === "w" || e.key === "W") inputRef.current.up = false;
       if (e.key === "s" || e.key === "S") inputRef.current.down = false;
       if (e.key === "a" || e.key === "A") inputRef.current.left = false;
@@ -550,9 +670,11 @@ export default function LockstepArenaPage() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, []);
+  }, [authUser, countdown, showGame]);
 
   const onMouseMove: React.MouseEventHandler<HTMLCanvasElement> = (e) => {
+    if (!showGame || !authUser || !selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -574,13 +696,40 @@ export default function LockstepArenaPage() {
     inputRef.current.aimY = sy + camY;
   };
 
-  const kd = playersRef.current.get(selfIdRef.current);
+  const createRoom = () => {
+    if (!sendWs({ type: "create_room" })) return;
+    setStatus("正在创建房间...");
+  };
+
+  const joinRoom = (id: string) => {
+    if (!sendWs({ type: "join_room", roomId: id })) return;
+    setStatus(`正在加入房间 ${id}...`);
+  };
+
+  const startGame = () => {
+    if (!sendWs({ type: "start_game" })) return;
+    setStatus("房主正在开始游戏...");
+  };
+
+  const leaveRoom = () => {
+    if (!sendWs({ type: "leave" })) return;
+    clearLocalRoomState();
+    setStatus("已退出游戏，回到大厅");
+  };
+
   const logout = () => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+    wsRef.current = null;
     localStorage.removeItem(AUTH_TOKEN_STORAGE);
     setAuthToken("");
     setAuthUser(null);
     setConnected(false);
-    setStatus("已退出登录");
+    setRoomList([]);
+    roomMetaRef.current = null;
+    setRoomMeta(null);
+    clearLocalRoomState();
+    navigate("/auth", { replace: true });
   };
 
   const statRows = useMemo(() => {
@@ -595,81 +744,194 @@ export default function LockstepArenaPage() {
       }));
   }, [playerCount, localFrame]);
 
+  if (authChecking) {
+    return (
+      <section className="shooter-page">
+        <h1>WS Arena</h1>
+        <p className="muted">身份校验中…准备进入战区。</p>
+      </section>
+    );
+  }
+
+  if (!authUser) return <Navigate to="/auth" replace />;
+
   return (
-    <section>
-      <h1>WebSocket 帧同步实验场（最多 5 人）</h1>
-      <p className="muted">已切换为账号身份模式。现在由服务端权威模拟位置/子弹/血量，刷新页面会立刻追上同一份状态。WASD 移动，鼠标瞄准，按住左键发射飞行弹丸。</p>
+    <section className={`shooter-page ${showGame ? "mode-game" : inWaitingRoom ? "mode-room" : "mode-lobby"}`}>
+      {!showGame && !inWaitingRoom && (
+        <>
+          <div className="page-hero">
+            <h1>战区大厅</h1>
+            <p className="muted">挑个房间落地。房主一键开局，所有人同步起跑。</p>
+          </div>
 
-      <div className="card identity-controls">
-        <div className="identity-meta">
-          <span className="muted">当前账号</span>
-          <code>{authUser ? `${authUser.username} (u_${authUser.id})` : "未登录"}</code>
-        </div>
-        <div className="identity-actions">
-          {authUser ? (
-            <button type="button" onClick={logout}>退出登录</button>
-          ) : (
-            <Link className="auth-link-btn" to="/auth">去登录 / 注册</Link>
-          )}
-        </div>
-      </div>
+          <div className="card identity-controls">
+            <div className="identity-meta">
+              <span className="muted">当前账号</span>
+              <code>{`${authUser.username} (u_${authUser.id})`}</code>
+            </div>
+            <div className="identity-actions">
+              <button type="button" onClick={logout} className="btn-danger">撤离</button>
+            </div>
+          </div>
 
-      {!authUser && !authChecking && (
-        <div className="card">
-          <p className="error">当前未登录，无法加入对战房间。请先到账号页登录。</p>
-        </div>
+          <div className="card room-list-card">
+            <div className="identity-controls">
+              <h3>房间列表</h3>
+              {!roomMeta && <button type="button" onClick={createRoom} className="btn-secondary">创建战局</button>}
+            </div>
+
+            {roomList.length === 0 && <p className="muted">战区空闲。创建一局，把他们拉进来。</p>}
+
+            {roomList.map((r) => {
+              const joined = inRoom && roomMeta?.id === r.id;
+              const canJoin = !joined && r.playerCount < r.maxPlayers;
+              return (
+                <div key={r.id} className="room-row">
+                  <div>
+                    <strong>房间 {r.id}</strong>
+                    <div className="muted">状态 {r.status} · 人数 {r.playerCount}/{r.maxPlayers}</div>
+                  </div>
+                  <div className="identity-actions">
+                    {canJoin && <button type="button" onClick={() => joinRoom(r.id)} className="btn-secondary">加入</button>}
+                    {joined && <button type="button" onClick={leaveRoom} className="btn-danger">撤离</button>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="card">
+            <div className="kpi"><span>连接状态</span><strong>{connected ? "已连接" : "未连接"}</strong></div>
+            <p className="muted">{status}</p>
+          </div>
+        </>
       )}
 
-      <div ref={arenaWrapRef} className="card arena-wrap">
-        <canvas
-          ref={canvasRef}
-          width={VIEW_W}
-          height={VIEW_H}
-          className="arena-canvas"
-          onMouseMove={onMouseMove}
-          onMouseDown={() => { inputRef.current.shoot = true; }}
-          onMouseUp={() => { inputRef.current.shoot = false; }}
-          onMouseLeave={() => { inputRef.current.shoot = false; }}
-        />
-      </div>
+      {!showGame && inWaitingRoom && (
+        <>
+          <div className="page-hero">
+            <h1>战局准备</h1>
+            <p className="muted">队友入场中。房主确认后开局。</p>
+          </div>
 
-      <div className="card">
-        <h3>调试面板</h3>
-        <div className="grid2">
-          <div className="kpi"><span>连接状态</span><strong>{status}</strong></div>
-          <div className="kpi"><span>玩家数量</span><strong>{playerCount}/5</strong></div>
-          <div className="kpi"><span>本地帧</span><strong>{localFrame}</strong></div>
-          <div className="kpi"><span>服务端帧</span><strong>{serverFrame}</strong></div>
-          <div className="kpi"><span>帧队列长度</span><strong>{queueLen}</strong></div>
-          <div className="kpi"><span>估算网络延迟</span><strong>{latencyMs}ms</strong></div>
-          <div className="kpi"><span>渲染 FPS</span><strong>{fps}</strong></div>
-          <div className="kpi"><span>输入控制权</span><strong>{canControl ? "激活页面（可操作）" : "非激活页面（观战）"}</strong></div>
-        </div>
+          <div className="card identity-controls">
+            <div className="identity-meta">
+              <span className="muted">房间号</span>
+              <code>{roomMeta?.id}</code>
+            </div>
+            <div className="identity-actions">
+              {isOwner && <button type="button" onClick={startGame} disabled={!canStartGame} className="btn-secondary">开局</button>}
+              <button type="button" onClick={leaveRoom} className="btn-danger">撤离</button>
+            </div>
+          </div>
 
-        <table className="score-table">
-          <thead>
-            <tr>
-              <th>玩家</th>
-              <th>状态</th>
-              <th>HP</th>
-              <th>死亡</th>
-            </tr>
-          </thead>
-          <tbody>
-            {statRows.map((r) => (
-              <tr key={r.id} className={r.me ? "me" : ""}>
-                <td>{r.id}</td>
-                <td>{r.alive ? "Alive" : "Respawn"}</td>
-                <td>{r.hp}</td>
-                <td>{r.deaths}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          {!isOwner && <div className="card waiting-card"><p className="muted">等待房主开局…保持警惕。</p></div>}
 
-        {!connected && authUser && <p className="error">WebSocket 未连接，请确认后端已运行。</p>}
-        {connected && playerCount >= 5 && !kd && <p className="error">房间已满，当前窗口是观战状态。</p>}
-      </div>
+          <div className="card">
+            <h3>小队成员</h3>
+            <table className="score-table">
+              <thead>
+                <tr>
+                  <th>玩家</th>
+                  <th>身份</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {statRows.map((r) => (
+                  <tr key={r.id} className={r.me ? "me" : ""}>
+                    <td>{r.id}</td>
+                    <td>{roomMeta?.ownerKey === r.id ? "房主" : "队员"}</td>
+                    <td>待命</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {showGame && (
+        <>
+          <div className="hud-row">
+            <div className="hud-pills" aria-label="实时状态">
+              <span className="pill"><span className="muted">房间</span><strong>{roomMeta?.id || "-"}</strong></span>
+              <span className="pill"><span className="muted">玩家</span><strong>{playerCount}/{roomMeta?.maxPlayers || 5}</strong></span>
+              <span className="pill"><span className="muted">延迟</span><strong>{latencyMs}ms</strong></span>
+              <span className="pill"><span className="muted">FPS</span><strong>{fps}</strong></span>
+            </div>
+            <div>
+              <button type="button" onClick={leaveRoom} className="btn-danger">撤离</button>
+            </div>
+          </div>
+
+          <div className="game-stage">
+            <div ref={arenaWrapRef} className="card arena-wrap game-canvas-wrap">
+              <canvas
+                ref={canvasRef}
+                width={VIEW_W}
+                height={VIEW_H}
+                className="arena-canvas"
+                tabIndex={0}
+                aria-label="对战画布（WASD 移动，鼠标瞄准/射击）"
+                onMouseMove={onMouseMove}
+                onMouseDown={() => {
+                  if (countdown === 0) inputRef.current.shoot = true;
+                }}
+                onMouseUp={() => {
+                  inputRef.current.shoot = false;
+                }}
+                onMouseLeave={() => {
+                  inputRef.current.shoot = false;
+                }}
+              />
+              {countdown > 0 && <div className="countdown-overlay">{countdown}</div>}
+            </div>
+
+            <aside className="card scoreboard-card" aria-label="计分板">
+              <h3>计分板</h3>
+              <table className="score-table compact">
+                <thead>
+                  <tr>
+                    <th>玩家</th>
+                    <th>状态</th>
+                    <th>HP</th>
+                    <th>死亡</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {statRows.map((r) => (
+                    <tr key={r.id} className={r.me ? "me" : ""}>
+                      <td>{r.id}</td>
+                      <td>{r.alive ? "Alive" : "Respawn"}</td>
+                      <td>{r.hp}</td>
+                      <td>{r.deaths}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </aside>
+          </div>
+
+          {debugEnabled && (
+            <div className="card">
+              <h3>战术面板</h3>
+              <div className="grid2">
+                <div className="kpi"><span>链路</span><strong>{status}</strong></div>
+                <div className="kpi"><span>在场</span><strong>{playerCount}/{roomMeta?.maxPlayers || 5}</strong></div>
+                <div className="kpi"><span>本地帧</span><strong>{localFrame}</strong></div>
+                <div className="kpi"><span>服务端帧</span><strong>{serverFrame}</strong></div>
+                <div className="kpi"><span>输入队列</span><strong>{queueLen}</strong></div>
+                <div className="kpi"><span>延迟估算</span><strong>{latencyMs}ms</strong></div>
+                <div className="kpi"><span>渲染</span><strong>{fps} FPS</strong></div>
+                <div className="kpi"><span>控制权</span><strong>{canControl ? "在线" : "挂起"}</strong></div>
+              </div>
+
+              <p className="muted">提示：计分板已常驻在右侧。此处保留给帧与输入调试。</p>
+            </div>
+          )}
+        </>
+      )}
     </section>
   );
 }
