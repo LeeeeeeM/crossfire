@@ -56,9 +56,31 @@ const VIEW_H = 620;
 const VIEW_ASPECT = VIEW_W / VIEW_H;
 const PLAYER_R = 14;
 const MAX_HP = 90;
+const MOVE_PER_FRAME = 5;
+const DEFAULT_TICK_MS = 50;
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function normalizeAngle(a: number) {
+  let x = a;
+  while (x > Math.PI) x -= Math.PI * 2;
+  while (x < -Math.PI) x += Math.PI * 2;
+  return x;
+}
+
+function circleRectHit(cx: number, cy: number, r: number, ob: Obstacle) {
+  const nx = clamp(cx, ob.x, ob.x + ob.w);
+  const ny = clamp(cy, ob.y, ob.y + ob.h);
+  const dx = cx - nx;
+  const dy = cy - ny;
+  return dx * dx + dy * dy <= r * r;
+}
+
+function collisionAt(x: number, y: number, world: World) {
+  if (x < PLAYER_R || y < PLAYER_R || x > world.width - PLAYER_R || y > world.height - PLAYER_R) return true;
+  return world.obstacles.some((ob) => circleRectHit(x, y, PLAYER_R, ob));
 }
 
 export default function LockstepArenaPage() {
@@ -75,6 +97,8 @@ export default function LockstepArenaPage() {
   const canControlRef = useRef(true);
   const viewportRef = useRef({ w: VIEW_W, h: VIEW_H });
   const fpsCounterRef = useRef({ lastTs: 0, frames: 0 });
+  const tickMsRef = useRef(DEFAULT_TICK_MS);
+  const predictedSelfRef = useRef<{ x: number; y: number; dir: number; lastTs: number } | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("连接中...");
@@ -187,12 +211,33 @@ export default function LockstepArenaPage() {
       setPlayerCount(next.size);
       setQueueLen(0);
       setLatencyMs(Math.max(0, Date.now() - Number(msg.serverTime || Date.now())));
+
+      const self = next.get(selfIdRef.current);
+      if (self) {
+        const now = performance.now();
+        const pred = predictedSelfRef.current;
+        if (!pred) {
+          predictedSelfRef.current = { x: self.x, y: self.y, dir: self.dir, lastTs: now };
+        } else {
+          const d = Math.hypot(pred.x - self.x, pred.y - self.y);
+          if (!self.alive || d > 30) {
+            pred.x = self.x;
+            pred.y = self.y;
+          } else {
+            pred.x += (self.x - pred.x) * 0.35;
+            pred.y += (self.y - pred.y) * 0.35;
+          }
+          pred.dir += normalizeAngle(self.dir - pred.dir) * 0.35;
+          pred.lastTs = now;
+        }
+      }
     };
 
     ws.onopen = () => {
       setConnected(true);
       setStatus(`已连接，账号: ${authUser.username}`);
       ws.send(JSON.stringify({ type: "auth", playerKey: `u_${authUser.id}`, playerName: authUser.username }));
+      tickMsRef.current = DEFAULT_TICK_MS;
     };
 
     ws.onclose = () => {
@@ -225,6 +270,7 @@ export default function LockstepArenaPage() {
 
       if (msg.type === "welcome") {
         selfIdRef.current = msg.id;
+        tickMsRef.current = Number(msg.tickMs || DEFAULT_TICK_MS);
         applyState(msg.snapshot);
         setStatus(`已加入，ID: ${msg.id}`);
         return;
@@ -311,13 +357,41 @@ export default function LockstepArenaPage() {
       const bullets = bulletsRef.current;
       const explosions = explosionsRef.current;
       const self = players.get(selfIdRef.current);
+      const predSelf = predictedSelfRef.current;
       const view = viewportRef.current;
       const sx = canvas.width / Math.max(view.w, 1);
       const sy = canvas.height / Math.max(view.h, 1);
       ctx.setTransform(sx, 0, 0, sy, 0, 0);
 
-      const camX = self ? clamp(self.x - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
-      const camY = self ? clamp(self.y - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
+      if (predSelf && self && self.alive && canControlRef.current) {
+        const now = performance.now();
+        const dt = clamp(now - predSelf.lastTs, 0, tickMsRef.current);
+        predSelf.lastTs = now;
+
+        const speed = MOVE_PER_FRAME / Math.max(tickMsRef.current, 1);
+        const input = inputRef.current;
+        const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+        const dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+        const len = Math.hypot(dx, dy) || 1;
+        const stepX = (dx / len) * speed * dt;
+        const stepY = (dy / len) * speed * dt;
+
+        let nx = predSelf.x + stepX;
+        let ny = predSelf.y;
+        if (collisionAt(nx, ny, world)) nx = predSelf.x;
+        ny = predSelf.y + stepY;
+        if (collisionAt(nx, ny, world)) ny = predSelf.y;
+        predSelf.x = nx;
+        predSelf.y = ny;
+
+        const angle = Math.atan2(input.aimY - predSelf.y, input.aimX - predSelf.x);
+        if (Number.isFinite(angle)) predSelf.dir = angle;
+      }
+
+      const camCenterX = predSelf && self ? predSelf.x : self ? self.x : 0;
+      const camCenterY = predSelf && self ? predSelf.y : self ? self.y : 0;
+      const camX = self ? clamp(camCenterX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
+      const camY = self ? clamp(camCenterY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
 
       const grad = ctx.createLinearGradient(0, 0, 0, view.h);
       grad.addColorStop(0, "#111b2d");
@@ -366,41 +440,45 @@ export default function LockstepArenaPage() {
       }
 
       for (const p of players.values()) {
+        const isSelf = p.id === selfIdRef.current;
+        const drawX = isSelf && predSelf ? predSelf.x : p.x;
+        const drawY = isSelf && predSelf ? predSelf.y : p.y;
+        const drawDir = isSelf && predSelf ? predSelf.dir : p.dir;
         const alpha = p.alive ? 1 : 0.3;
         ctx.globalAlpha = alpha;
 
         ctx.fillStyle = "rgba(0,0,0,0.35)";
         ctx.beginPath();
-        ctx.ellipse(p.x, p.y + 10, 14, 6, 0, 0, Math.PI * 2);
+        ctx.ellipse(drawX, drawY + 10, 14, 6, 0, 0, Math.PI * 2);
         ctx.fill();
 
         ctx.fillStyle = p.color;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, PLAYER_R, 0, Math.PI * 2);
+        ctx.arc(drawX, drawY, PLAYER_R, 0, Math.PI * 2);
         ctx.fill();
 
         ctx.strokeStyle = "rgba(255,255,255,0.75)";
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.moveTo(p.x, p.y);
-        ctx.lineTo(p.x + Math.cos(p.dir) * 20, p.y + Math.sin(p.dir) * 20);
+        ctx.moveTo(drawX, drawY);
+        ctx.lineTo(drawX + Math.cos(drawDir) * 20, drawY + Math.sin(drawDir) * 20);
         ctx.stroke();
 
         ctx.globalAlpha = 1;
         ctx.fillStyle = "#e7f0ff";
         ctx.font = "12px Menlo";
-        ctx.fillText(p.name, p.x - 12, p.y - 20);
+        ctx.fillText(p.name, drawX - 12, drawY - 20);
 
         if (p.alive) {
           const hpW = 28;
           ctx.fillStyle = "#4b1d1d";
-          ctx.fillRect(p.x - hpW / 2, p.y - 28, hpW, 4);
+          ctx.fillRect(drawX - hpW / 2, drawY - 28, hpW, 4);
           ctx.fillStyle = "#62d266";
-          ctx.fillRect(p.x - hpW / 2, p.y - 28, (hpW * p.hp) / MAX_HP, 4);
+          ctx.fillRect(drawX - hpW / 2, drawY - 28, (hpW * p.hp) / MAX_HP, 4);
         } else {
           const remain = Math.max(0, p.respawnAt - localFrameRef.current);
           ctx.fillStyle = "#ffd28f";
-          ctx.fillText(`Respawn ${(remain / 20).toFixed(1)}s`, p.x - 34, p.y - 28);
+          ctx.fillText(`Respawn ${(remain / 20).toFixed(1)}s`, drawX - 34, drawY - 28);
         }
       }
 
@@ -457,9 +535,12 @@ export default function LockstepArenaPage() {
     const sy = (e.clientY - rect.top) * scaleY;
 
     const self = playersRef.current.get(selfIdRef.current);
+    const predSelf = predictedSelfRef.current;
     const world = worldRef.current;
-    const camX = self ? clamp(self.x - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
-    const camY = self ? clamp(self.y - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
+    const centerX = predSelf && self ? predSelf.x : self ? self.x : 0;
+    const centerY = predSelf && self ? predSelf.y : self ? self.y : 0;
+    const camX = self ? clamp(centerX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
+    const camY = self ? clamp(centerY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
 
     inputRef.current.aimX = sx + camX;
     inputRef.current.aimY = sy + camY;
