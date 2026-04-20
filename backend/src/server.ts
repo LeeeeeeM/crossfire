@@ -155,19 +155,34 @@ const OBSTACLES: Obstacle[] = [
 const COLORS = ["#2f7bd9", "#e06c4e", "#22a67a", "#ab54d1", "#c19434"];
 
 let idSeq = 1;
-let bulletSeq = 1;
-let frame = 0;
-let roomId = "";
-let roomOwnerKey = "";
-let roomStatus: RoomStatus = "idle";
+
+type RoomMeta = {
+  id: string;
+  ownerKey: string;
+  status: RoomStatus;
+  playerCount: number;
+  maxPlayers: number;
+};
+
+type RoomState = {
+  id: string;
+  ownerKey: string;
+  status: RoomStatus;
+  createdAt: number;
+  frame: number;
+  bulletSeq: number;
+  players: Map<string, RoomPlayer>;
+  bullets: Bullet[];
+  explosions: Explosion[];
+  offlineDeadlines: Map<string, number>;
+};
+
+const rooms = new Map<string, RoomState>();
+const playerToRoom = new Map<string, string>();
 
 const clients = new Map<string, ServerWebSocket<WsData>>();
-const players = new Map<string, RoomPlayer>();
 const connToPlayer = new Map<string, string>();
 const playerToConns = new Map<string, Set<string>>();
-const offlineDeadlines = new Map<string, number>();
-let bullets: Bullet[] = [];
-let explosions: Explosion[] = [];
 
 const json = (data: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(data), {
@@ -256,19 +271,24 @@ function spawnFor(player: RoomPlayer) {
   return SPAWNS[idx];
 }
 
-function roomInfo() {
-  if (roomStatus === "idle" || !roomId) return null;
+function roomMeta(room: RoomState): RoomMeta {
   return {
-    id: roomId,
-    ownerKey: roomOwnerKey,
-    status: roomStatus,
-    playerCount: players.size,
+    id: room.id,
+    ownerKey: room.ownerKey,
+    status: room.status,
+    playerCount: room.players.size,
     maxPlayers: MAX_PLAYERS
   };
 }
 
-function playersPayload() {
-  return Array.from(players.values()).map((p) => ({
+function listRooms(): RoomMeta[] {
+  return Array.from(rooms.values())
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((r) => roomMeta(r));
+}
+
+function playersPayload(room: RoomState) {
+  return Array.from(room.players.values()).map((p) => ({
     id: p.id,
     name: p.name,
     color: p.color,
@@ -285,17 +305,17 @@ function playersPayload() {
   }));
 }
 
-function statePayload(type: "state" | "snapshot", reason?: string) {
+function statePayload(room: RoomState, type: "state" | "snapshot", reason?: string) {
   return {
     type,
     reason,
-    frame,
+    frame: room.frame,
     serverTime: Date.now(),
-    room: roomInfo(),
+    room: roomMeta(room),
     world: { width: WORLD_WIDTH, height: WORLD_HEIGHT, obstacles: OBSTACLES },
-    players: playersPayload(),
-    bullets,
-    explosions
+    players: playersPayload(room),
+    bullets: room.bullets,
+    explosions: room.explosions
   };
 }
 
@@ -305,48 +325,51 @@ function sendTo(connId: string, data: unknown) {
   ws.send(JSON.stringify(data));
 }
 
-function broadcastToRoom(data: unknown) {
-  if (roomStatus === "idle") return;
+function broadcastToRoom(room: RoomState, data: unknown) {
   const text = JSON.stringify(data);
-  for (const ws of clients.values()) {
-    if (!ws.data.authed) continue;
-    const key = ws.data.playerKey;
-    if (!key) continue;
-    if (players.has(key)) ws.send(text);
+  for (const playerKey of room.players.keys()) {
+    const conns = playerToConns.get(playerKey);
+    if (!conns) continue;
+    for (const connId of conns.values()) {
+      const ws = clients.get(connId);
+      if (!ws) continue;
+      ws.send(text);
+    }
   }
 }
 
-function sendLobbyState(connId: string) {
-  sendTo(connId, { type: "lobby_state", room: roomInfo() });
+function sendLobbyState(connId: string, playerKey?: string) {
+  const roomId = playerKey ? playerToRoom.get(playerKey) || "" : "";
+  const room = roomId ? rooms.get(roomId) : null;
+  sendTo(connId, { type: "lobby_state", room: room ? roomMeta(room) : null, rooms: listRooms() });
 }
 
 function broadcastLobbyState() {
-  const text = JSON.stringify({ type: "lobby_state", room: roomInfo() });
   for (const ws of clients.values()) {
     if (!ws.data.authed) continue;
-    ws.send(text);
+    sendLobbyState(ws.data.connId, ws.data.playerKey);
   }
 }
 
-function broadcastSnapshot(reason: string) {
-  broadcastToRoom(statePayload("snapshot", reason));
+function broadcastSnapshot(room: RoomState, reason: string) {
+  broadcastToRoom(room, statePayload(room, "snapshot", reason));
   broadcastLobbyState();
 }
 
-function pickAvailableColor() {
-  const used = new Set(Array.from(players.values()).map((p) => p.color));
+function pickAvailableColor(room: RoomState) {
+  const used = new Set(Array.from(room.players.values()).map((p) => p.color));
   for (const color of COLORS) {
     if (!used.has(color)) return color;
   }
-  return COLORS[players.size % COLORS.length];
+  return COLORS[room.players.size % COLORS.length];
 }
 
-function createPlayer(playerKey: string, playerName: string) {
-  const spawn = SPAWNS[players.size % SPAWNS.length];
+function createPlayer(room: RoomState, playerKey: string, playerName: string) {
+  const spawn = SPAWNS[room.players.size % SPAWNS.length];
   return {
     id: playerKey,
     name: playerName,
-    color: pickAvailableColor(),
+    color: pickAvailableColor(room),
     x: spawn.x,
     y: spawn.y,
     hp: MAX_HP,
@@ -362,36 +385,26 @@ function createPlayer(playerKey: string, playerName: string) {
   } as RoomPlayer;
 }
 
-function maybeResetRoomAfterEmpty() {
-  if (players.size > 0) return;
-  roomId = "";
-  roomOwnerKey = "";
-  roomStatus = "idle";
-  frame = 0;
-  bullets = [];
-  explosions = [];
-  offlineDeadlines.clear();
-  broadcastLobbyState();
-}
-
-function removePlayer(playerKey: string, reason: string) {
-  const existed = players.delete(playerKey);
-  offlineDeadlines.delete(playerKey);
+function removePlayerFromRoom(room: RoomState, playerKey: string, reason: string) {
+  const existed = room.players.delete(playerKey);
+  room.offlineDeadlines.delete(playerKey);
+  playerToRoom.delete(playerKey);
   if (!existed) return;
 
-  bullets = bullets.filter((b) => b.owner !== playerKey);
+  room.bullets = room.bullets.filter((b) => b.owner !== playerKey);
 
-  if (roomOwnerKey === playerKey) {
-    const nextOwner = Array.from(players.keys()).sort()[0] || "";
-    roomOwnerKey = nextOwner;
+  if (room.ownerKey === playerKey) {
+    const nextOwner = Array.from(room.players.keys()).sort()[0] || "";
+    room.ownerKey = nextOwner;
   }
 
-  if (players.size === 0) {
-    maybeResetRoomAfterEmpty();
+  if (room.players.size === 0) {
+    rooms.delete(room.id);
+    broadcastLobbyState();
     return;
   }
 
-  broadcastSnapshot(reason);
+  broadcastSnapshot(room, reason);
 }
 
 function ensureConnectionMaps(playerKey: string, connId: string) {
@@ -405,13 +418,19 @@ function ensureConnectionMaps(playerKey: string, connId: string) {
 }
 
 function sendWelcome(connId: string, playerKey: string, reason: string) {
+  const roomId = playerToRoom.get(playerKey) || "";
+  const room = roomId ? rooms.get(roomId) : null;
+  if (!room) {
+    sendLobbyState(connId, playerKey);
+    return;
+  }
   sendTo(connId, {
     type: "welcome",
     id: playerKey,
     connId,
     maxPlayers: MAX_PLAYERS,
     tickMs: TICK_MS,
-    snapshot: statePayload("snapshot", reason)
+    snapshot: statePayload(room, "snapshot", reason)
   });
 }
 
@@ -424,47 +443,62 @@ function attachAuthedConnection(ws: ServerWebSocket<WsData>, playerKey: string, 
 
   ensureConnectionMaps(playerKey, connId);
 
-  if (players.has(playerKey)) {
-    offlineDeadlines.delete(playerKey);
+  const roomId = playerToRoom.get(playerKey) || "";
+  const room = roomId ? rooms.get(roomId) : null;
+  if (room && room.players.has(playerKey)) {
+    room.offlineDeadlines.delete(playerKey);
     sendWelcome(connId, playerKey, "existing_player_attach");
     return;
   }
 
-  sendLobbyState(connId);
+  sendLobbyState(connId, playerKey);
 }
 
 function createRoom(ownerKey: string) {
-  roomId = Math.random().toString(36).slice(2, 8).toUpperCase();
-  roomOwnerKey = ownerKey;
-  roomStatus = "waiting";
-  frame = 0;
-  bullets = [];
-  explosions = [];
+  let id = "";
+  for (let i = 0; i < 10; i += 1) {
+    id = Math.random().toString(36).slice(2, 8).toUpperCase();
+    if (!rooms.has(id)) break;
+  }
+  const room: RoomState = {
+    id,
+    ownerKey,
+    status: "waiting",
+    createdAt: Date.now(),
+    frame: 0,
+    bulletSeq: 1,
+    players: new Map(),
+    bullets: [],
+    explosions: [],
+    offlineDeadlines: new Map()
+  };
+  rooms.set(id, room);
+  return room;
 }
 
-function addPlayerToRoom(playerKey: string, playerName: string) {
-  const existing = players.get(playerKey);
+function addPlayerToRoom(room: RoomState, playerKey: string, playerName: string) {
+  const existing = room.players.get(playerKey);
   if (existing) return existing;
-  if (roomStatus === "idle") return null;
-  if (players.size >= MAX_PLAYERS) return null;
+  if (room.players.size >= MAX_PLAYERS) return null;
 
-  const p = createPlayer(playerKey, playerName);
-  players.set(playerKey, p);
-  offlineDeadlines.delete(playerKey);
+  const p = createPlayer(room, playerKey, playerName);
+  room.players.set(playerKey, p);
+  playerToRoom.set(playerKey, room.id);
+  room.offlineDeadlines.delete(playerKey);
   return p;
 }
 
-function startRoomBy(ownerKey: string) {
-  if (roomStatus !== "waiting") return { ok: false, reason: "already_started" };
-  if (roomOwnerKey !== ownerKey) return { ok: false, reason: "not_owner" };
-  if (players.size < 1) return { ok: false, reason: "empty_room" };
+function startRoomBy(room: RoomState, ownerKey: string) {
+  if (room.status !== "waiting") return { ok: false, reason: "already_started" };
+  if (room.ownerKey !== ownerKey) return { ok: false, reason: "not_owner" };
+  if (room.players.size < 1) return { ok: false, reason: "empty_room" };
 
-  roomStatus = "started";
-  frame = 0;
-  bullets = [];
-  explosions = [];
+  room.status = "started";
+  room.frame = 0;
+  room.bullets = [];
+  room.explosions = [];
 
-  for (const p of players.values()) {
+  for (const p of room.players.values()) {
     p.hp = MAX_HP;
     p.alive = true;
     p.respawnAt = 0;
@@ -478,129 +512,131 @@ function startRoomBy(ownerKey: string) {
     p.y = s.y;
   }
 
-  broadcastSnapshot("game_started");
+  broadcastSnapshot(room, "game_started");
   return { ok: true };
 }
 
 setInterval(() => {
-  if (roomStatus !== "started") return;
-
-  frame += 1;
-
   const now = Date.now();
-  for (const [playerKey, deadline] of offlineDeadlines.entries()) {
-    if (now >= deadline) {
-      removePlayer(playerKey, `player_timeout_${playerKey}`);
-    }
-  }
+  for (const room of rooms.values()) {
+    if (room.status !== "started") continue;
 
-  const ids = Array.from(players.keys()).sort();
+    room.frame += 1;
 
-  for (const id of ids) {
-    const p = players.get(id);
-    if (!p) continue;
-
-    if (now - p.lastInputAt > INPUT_TIMEOUT_MS) {
-      p.input = clearActionInputKeepAim(p.input);
-    }
-
-    const input = p.input;
-
-    if (!p.alive) {
-      if (frame >= p.respawnAt) {
-        const s = spawnFor(p);
-        p.x = s.x;
-        p.y = s.y;
-        p.hp = MAX_HP;
-        p.alive = true;
-        p.cooldown = 0;
-        p.prevShoot = false;
+    for (const [playerKey, deadline] of room.offlineDeadlines.entries()) {
+      if (now >= deadline) {
+        removePlayerFromRoom(room, playerKey, `player_timeout_${playerKey}`);
       }
-      continue;
     }
 
-    const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-    const dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-    const len = Math.hypot(dx, dy) || 1;
-    const vx = (dx / len) * MOVE_PER_FRAME;
-    const vy = (dy / len) * MOVE_PER_FRAME;
+    const ids = Array.from(room.players.keys()).sort();
 
-    let nx = p.x + vx;
-    let ny = p.y;
-    if (collisionAt(nx, ny)) nx = p.x;
-    ny = p.y + vy;
-    if (collisionAt(nx, ny)) ny = p.y;
-    p.x = nx;
-    p.y = ny;
+    for (const id of ids) {
+      const p = room.players.get(id);
+      if (!p) continue;
 
-    const angle = Math.atan2(input.aimY - p.y, input.aimX - p.x);
-    if (Number.isFinite(angle)) p.dir = angle;
+      if (now - p.lastInputAt > INPUT_TIMEOUT_MS) {
+        p.input = clearActionInputKeepAim(p.input);
+      }
 
-    if (p.cooldown > 0) p.cooldown -= 1;
-    const shootEdge = input.shoot && !p.prevShoot;
-    if (shootEdge && p.cooldown <= 0) {
-      bullets.push({
-        id: `${frame}-${bulletSeq++}`,
-        owner: p.id,
-        x: p.x + Math.cos(p.dir) * 20,
-        y: p.y + Math.sin(p.dir) * 20,
-        vx: Math.cos(p.dir) * BULLET_SPEED,
-        vy: Math.sin(p.dir) * BULLET_SPEED,
-        ttl: BULLET_TTL
-      });
-      p.cooldown = 6;
-    }
-    p.prevShoot = input.shoot;
-  }
+      const input = p.input;
 
-  for (let i = bullets.length - 1; i >= 0; i -= 1) {
-    const b = bullets[i];
-    b.x += b.vx;
-    b.y += b.vy;
-    b.ttl -= 1;
-
-    let remove = b.ttl <= 0;
-    if (!remove && (b.x < 0 || b.y < 0 || b.x > WORLD_WIDTH || b.y > WORLD_HEIGHT)) {
-      remove = true;
-    }
-
-    if (!remove) {
-      for (const ob of OBSTACLES) {
-        if (b.x >= ob.x && b.x <= ob.x + ob.w && b.y >= ob.y && b.y <= ob.y + ob.h) {
-          remove = true;
-          explosions.push({ x: b.x, y: b.y, born: frame });
-          break;
+      if (!p.alive) {
+        if (room.frame >= p.respawnAt) {
+          const s = spawnFor(p);
+          p.x = s.x;
+          p.y = s.y;
+          p.hp = MAX_HP;
+          p.alive = true;
+          p.cooldown = 0;
+          p.prevShoot = false;
         }
+        continue;
       }
+
+      const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+      const dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+      const len = Math.hypot(dx, dy) || 1;
+      const vx = (dx / len) * MOVE_PER_FRAME;
+      const vy = (dy / len) * MOVE_PER_FRAME;
+
+      let nx = p.x + vx;
+      let ny = p.y;
+      if (collisionAt(nx, ny)) nx = p.x;
+      ny = p.y + vy;
+      if (collisionAt(nx, ny)) ny = p.y;
+      p.x = nx;
+      p.y = ny;
+
+      const angle = Math.atan2(input.aimY - p.y, input.aimX - p.x);
+      if (Number.isFinite(angle)) p.dir = angle;
+
+      if (p.cooldown > 0) p.cooldown -= 1;
+      const shootEdge = input.shoot && !p.prevShoot;
+      if (shootEdge && p.cooldown <= 0) {
+        room.bullets.push({
+          id: `${room.frame}-${room.bulletSeq++}`,
+          owner: p.id,
+          x: p.x + Math.cos(p.dir) * 20,
+          y: p.y + Math.sin(p.dir) * 20,
+          vx: Math.cos(p.dir) * BULLET_SPEED,
+          vy: Math.sin(p.dir) * BULLET_SPEED,
+          ttl: BULLET_TTL
+        });
+        p.cooldown = 6;
+      }
+      p.prevShoot = input.shoot;
     }
 
-    if (!remove) {
-      for (const id of ids) {
-        if (id === b.owner) continue;
-        const p = players.get(id);
-        if (!p || !p.alive) continue;
+    for (let i = room.bullets.length - 1; i >= 0; i -= 1) {
+      const b = room.bullets[i];
+      b.x += b.vx;
+      b.y += b.vy;
+      b.ttl -= 1;
 
-        const d2 = (p.x - b.x) * (p.x - b.x) + (p.y - b.y) * (p.y - b.y);
-        if (d2 <= (PLAYER_R + 2) * (PLAYER_R + 2)) {
-          p.hp -= DAMAGE;
-          explosions.push({ x: b.x, y: b.y, born: frame });
-          if (p.hp <= 0) {
-            p.alive = false;
-            p.deaths += 1;
-            p.respawnAt = frame + RESPAWN_FRAMES;
+      let remove = b.ttl <= 0;
+      if (!remove && (b.x < 0 || b.y < 0 || b.x > WORLD_WIDTH || b.y > WORLD_HEIGHT)) {
+        remove = true;
+      }
+
+      if (!remove) {
+        for (const ob of OBSTACLES) {
+          if (b.x >= ob.x && b.x <= ob.x + ob.w && b.y >= ob.y && b.y <= ob.y + ob.h) {
+            remove = true;
+            room.explosions.push({ x: b.x, y: b.y, born: room.frame });
+            break;
           }
-          remove = true;
-          break;
         }
       }
+
+      if (!remove) {
+        for (const id of ids) {
+          if (id === b.owner) continue;
+          const p = room.players.get(id);
+          if (!p || !p.alive) continue;
+
+          const d2 = (p.x - b.x) * (p.x - b.x) + (p.y - b.y) * (p.y - b.y);
+          if (d2 <= (PLAYER_R + 2) * (PLAYER_R + 2)) {
+            p.hp -= DAMAGE;
+            room.explosions.push({ x: b.x, y: b.y, born: room.frame });
+            if (p.hp <= 0) {
+              p.alive = false;
+              p.deaths += 1;
+              p.respawnAt = room.frame + RESPAWN_FRAMES;
+            }
+            remove = true;
+            break;
+          }
+        }
+      }
+
+      if (remove) room.bullets.splice(i, 1);
     }
 
-    if (remove) bullets.splice(i, 1);
+    room.explosions = room.explosions.filter((e) => room.frame - e.born <= 15);
+
+    broadcastToRoom(room, statePayload(room, "state"));
   }
-
-  explosions = explosions.filter((e) => frame - e.born <= 15);
-
-  broadcastToRoom(statePayload("state"));
 }, TICK_MS);
 
 const server = Bun.serve<WsData>({
@@ -645,77 +681,86 @@ const server = Bun.serve<WsData>({
       if (!playerKey) return;
 
       if (msg?.type === "create_room") {
-        if (players.has(playerKey)) {
+        const existingRoomId = playerToRoom.get(playerKey) || "";
+        if (existingRoomId) {
           ws.send(JSON.stringify({ type: "reject", reason: "already_in_room" }));
           return;
         }
-        if (roomStatus !== "idle") {
-          ws.send(JSON.stringify({ type: "reject", reason: "room_exists" }));
-          sendLobbyState(wsData.connId);
-          return;
-        }
-
-        createRoom(playerKey);
-        const p = addPlayerToRoom(playerKey, playerName);
+        const room = createRoom(playerKey);
+        const p = addPlayerToRoom(room, playerKey, playerName);
         if (!p) {
           ws.send(JSON.stringify({ type: "reject", reason: "room_join_failed" }));
           return;
         }
 
         sendWelcome(wsData.connId, playerKey, "room_created");
-        broadcastSnapshot(`player_join_${playerKey}`);
+        broadcastSnapshot(room, `player_join_${playerKey}`);
         return;
       }
 
       if (msg?.type === "join_room") {
         const reqRoomId = String(msg.roomId || "").trim();
-        if (roomStatus === "idle" || !roomId || roomId !== reqRoomId) {
+        const room = rooms.get(reqRoomId);
+        if (!room) {
           ws.send(JSON.stringify({ type: "reject", reason: "room_not_found" }));
-          sendLobbyState(wsData.connId);
+          sendLobbyState(wsData.connId, playerKey);
           return;
         }
 
-        if (players.has(playerKey)) {
-          sendWelcome(wsData.connId, playerKey, "existing_player_attach");
+        const existingRoomId = playerToRoom.get(playerKey) || "";
+        if (existingRoomId) {
+          if (existingRoomId === room.id) {
+            sendWelcome(wsData.connId, playerKey, "existing_player_attach");
+            return;
+          }
+          ws.send(JSON.stringify({ type: "reject", reason: "already_in_room" }));
           return;
         }
 
-        if (players.size >= MAX_PLAYERS) {
+        if (room.players.size >= MAX_PLAYERS) {
           ws.send(JSON.stringify({ type: "reject", reason: "room_full", maxPlayers: MAX_PLAYERS }));
           return;
         }
 
-        const p = addPlayerToRoom(playerKey, playerName);
+        const p = addPlayerToRoom(room, playerKey, playerName);
         if (!p) {
           ws.send(JSON.stringify({ type: "reject", reason: "room_join_failed" }));
           return;
         }
 
         sendWelcome(wsData.connId, playerKey, "new_player_join");
-        broadcastSnapshot(`player_join_${playerKey}`);
+        broadcastSnapshot(room, `player_join_${playerKey}`);
         return;
       }
 
       if (msg?.type === "start_game") {
-        const ret = startRoomBy(playerKey);
+        const roomId = playerToRoom.get(playerKey) || "";
+        const room = roomId ? rooms.get(roomId) : null;
+        if (!room) {
+          ws.send(JSON.stringify({ type: "reject", reason: "not_in_room" }));
+          return;
+        }
+        const ret = startRoomBy(room, playerKey);
         if (!ret.ok) ws.send(JSON.stringify({ type: "reject", reason: ret.reason }));
         return;
       }
 
-      const p = players.get(playerKey);
+      const roomId = playerToRoom.get(playerKey) || "";
+      const room = roomId ? rooms.get(roomId) : null;
+      const p = room ? room.players.get(playerKey) : null;
       if (!p) {
-        if (msg?.type === "list_rooms") sendLobbyState(wsData.connId);
+        if (msg?.type === "list_rooms") sendLobbyState(wsData.connId, playerKey);
         return;
       }
 
       if (msg?.type === "leave") {
-        removePlayer(playerKey, `player_leave_${playerKey}`);
-        sendLobbyState(wsData.connId);
+        removePlayerFromRoom(room!, playerKey, `player_leave_${playerKey}`);
+        sendLobbyState(wsData.connId, playerKey);
         return;
       }
 
       if (msg?.type === "input") {
-        if (roomStatus !== "started") return;
+        if (!room || room.status !== "started") return;
 
         const seq = Number(msg.seq || 0);
         if (!Number.isFinite(seq) || seq <= p.lastProcessedInputSeq) return;
@@ -746,9 +791,11 @@ const server = Bun.serve<WsData>({
       if (connSet.size > 0) return;
       playerToConns.delete(playerKey);
 
-      if (players.has(playerKey)) {
-        offlineDeadlines.set(playerKey, Date.now() + RECONNECT_GRACE_MS);
-        broadcastSnapshot(`player_offline_${playerKey}`);
+      const roomId = playerToRoom.get(playerKey) || "";
+      const room = roomId ? rooms.get(roomId) : null;
+      if (room && room.players.has(playerKey)) {
+        room.offlineDeadlines.set(playerKey, Date.now() + RECONNECT_GRACE_MS);
+        broadcastSnapshot(room, `player_offline_${playerKey}`);
       }
     }
   },

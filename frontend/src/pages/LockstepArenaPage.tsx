@@ -104,6 +104,22 @@ function parseRoom(raw: any): RoomMeta | null {
   };
 }
 
+function parseRooms(raw: any): RoomMeta[] {
+  if (Array.isArray(raw?.rooms)) {
+    return raw.rooms
+      .filter((x: any) => x && x.id)
+      .map((x: any) => ({
+        id: String(x.id),
+        ownerKey: String(x.ownerKey || ""),
+        status: x.status === "started" ? "started" : x.status === "waiting" ? "waiting" : "idle",
+        playerCount: Number(x.playerCount || 0),
+        maxPlayers: Number(x.maxPlayers || 5)
+      }));
+  }
+  const single = parseRoom(raw);
+  return single ? [single] : [];
+}
+
 export default function LockstepArenaPage() {
   const navigate = useNavigate();
 
@@ -264,17 +280,23 @@ export default function LockstepArenaPage() {
     wsRef.current = ws;
     setStatus(`连接中，账号: ${authUser.username}`);
 
-    const updateRoomMeta = (next: RoomMeta | null) => {
-      roomMetaRef.current = next;
-      setRoomMeta(next);
-      setRoomList(next ? [next] : []);
+    const updateLobby = (msg: any) => {
+      const rooms = parseRooms(msg);
+      setRoomList(rooms);
+
+      const nextRoom = parseRoom(msg);
+      roomMetaRef.current = nextRoom;
+      setRoomMeta(nextRoom);
+
+      return { rooms, nextRoom };
     };
 
     const applyState = (msg: any) => {
       if (!Array.isArray(msg?.players)) return;
 
       const nextRoom = parseRoom(msg);
-      updateRoomMeta(nextRoom);
+      roomMetaRef.current = nextRoom;
+      setRoomMeta(nextRoom);
 
       if (msg.world && Array.isArray(msg.world.obstacles)) {
         worldRef.current = msg.world;
@@ -408,13 +430,12 @@ export default function LockstepArenaPage() {
       }
 
       if (msg.type === "lobby_state") {
-        const nextRoom = parseRoom(msg);
-        updateRoomMeta(nextRoom);
+        const { rooms, nextRoom } = updateLobby(msg);
         const currentlyInRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
         const sameRoom = !!nextRoom && !!roomMetaRef.current && nextRoom.id === roomMetaRef.current.id;
         if (!currentlyInRoom || !sameRoom) {
           clearLocalRoomState();
-          setStatus(nextRoom ? `大厅：房间 ${nextRoom.id} (${nextRoom.playerCount}/${nextRoom.maxPlayers})` : "大厅：暂无房间");
+          setStatus(rooms.length > 0 ? `大厅：${rooms.length} 个房间在线` : "大厅：暂无房间");
         }
         return;
       }
