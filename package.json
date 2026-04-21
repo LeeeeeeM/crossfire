@@ -1,0 +1,11 @@
+{
+  "name": "sync-evolution-demo",
+  "private": true,
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "dev:frontend": "pnpm -C frontend dev",
+    "dev:backend": "pnpm -C backend dev",
+    "build:frontend": "pnpm -C frontend build",
+    "typecheck:backend": "pnpm -C backend exec bunx tsc --noEmit -p tsconfig.json"
+  }
+}

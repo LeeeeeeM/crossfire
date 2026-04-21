@@ -1,7 +1,26 @@
 import type { Evolution } from "./types";
 
-const API = "";
+const API = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+const WS_BASE = String(import.meta.env.VITE_WS_BASE || "").replace(/\/+$/, "");
 export const AUTH_TOKEN_STORAGE = "sync_auth_token";
+
+function fallbackWsBase() {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}`;
+}
+
+export function lockstepWsUrl(token: string) {
+  const base =
+    WS_BASE ||
+    (API
+      ? API.startsWith("https://")
+        ? API.replace(/^https:\/\//, "wss://")
+        : API.startsWith("http://")
+          ? API.replace(/^http:\/\//, "ws://")
+          : fallbackWsBase()
+      : fallbackWsBase());
+  return `${base}/ws/lockstep?token=${encodeURIComponent(token)}`;
+}
 
 export async function fetchEvolutions(): Promise<Evolution[]> {
   const res = await fetch(`${API}/api/evolutions`);

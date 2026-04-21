@@ -1,8 +1,7 @@
 import { Pool } from "pg";
+import { APP_CONFIG } from "../config/app-config";
 
-const DATABASE_URL = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/sync_demo";
-
-export const pool = new Pool({ connectionString: DATABASE_URL });
+export const pool = new Pool({ connectionString: APP_CONFIG.databaseUrl });
 
 let initPromise: Promise<void> | null = null;
 

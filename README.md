@@ -8,8 +8,7 @@
 ### 1) 启动后端
 
 ```bash
-cd backend
-bun run dev
+pnpm -C backend dev
 ```
 
 接口：
@@ -48,15 +47,42 @@ cd backend
 DATABASE_URL='postgres://user:pass@host:5432/dbname' bun run dev
 ```
 
+后端可选环境变量：
+
+- `PORT`（默认 `8787`）
+- `CORS_ORIGIN`（默认 `*`）
+- `TICK_MS`、`MAX_PLAYERS`、`MOVE_PER_FRAME` 等（用于覆盖游戏参数，见 `backend/src/config/app-config.ts`）
+
 ### 2) 启动前端
 
 ```bash
-cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm -C frontend dev
 ```
 
 打开：`http://localhost:5174`
+
+前端可选环境变量（`.env.local`）：
+
+```bash
+VITE_API_BASE=
+VITE_WS_BASE=
+VITE_BACKEND_HTTP_TARGET=http://127.0.0.1:8787
+VITE_BACKEND_WS_TARGET=ws://127.0.0.1:8787
+```
+
+- `VITE_API_BASE`、`VITE_WS_BASE` 用于前端请求真实地址（留空默认同源）
+- `VITE_BACKEND_HTTP_TARGET`、`VITE_BACKEND_WS_TARGET` 用于本地 Vite 代理目标
+
+## 包管理
+
+- 工作区：`pnpm-workspace.yaml`（`frontend` + `backend`）
+- 统一安装：`pnpm install`
+- 根脚本：
+  - `pnpm dev:frontend`
+  - `pnpm dev:backend`
+  - `pnpm build:frontend`
+  - `pnpm typecheck:backend`
 
 ## 路由
 
@@ -66,4 +92,20 @@ npm run dev
 - `/source` Source 快照增量同步可视化
 - `/freefire` Free Fire 混合同步可视化
 - `/auth` 注册/登录页（PG 账号）
-- `/arena` WebSocket 帧同步对战页（登录账号即玩家身份）
+- `/lobby` WebSocket 帧同步对战页（登录账号即玩家身份）
+
+## 文档
+
+- `docs/gameplay.md`：玩法与**当前实现**说明（操作/物品栏/匕首与枪械弹药/自动换弹、系统提示、物资投放等；另含模式与系统草案）
+
+## 后端架构（当前）
+
+- `backend/src/server.ts`：应用装配入口（初始化、依赖注入、Bun.serve）
+- `backend/src/controllers/http-routes.ts`：HTTP 业务路由（health/auth/evolutions）
+- `backend/src/controllers/ws-upgrade.ts`：WebSocket 握手升级与 token 校验
+- `backend/src/controllers/ws-handlers.ts`：WebSocket open/message/close 事件处理
+- `backend/src/services/game-loop.ts`：主循环 tick（移动、战斗、掉落、广播）
+- `backend/src/services/room-service.ts`：房间域模型与房间生命周期操作
+- `backend/src/services/transport-service.ts`：房间/大厅消息发送与连接附着
+- `backend/src/services/inventory-service.ts` / `backend/src/services/combat-service.ts` / `backend/src/utils/math-utils.ts`：规则与计算模块
+- `backend/src/services/state-store.ts`：运行时状态容器（rooms/players/clients）

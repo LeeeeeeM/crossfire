@@ -299,9 +299,19 @@ input[type="range"] { width: 100%; }
   position: relative;
 }
 
+.arena-announce-mount {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  max-width: calc(100% - 20px);
+  pointer-events: none;
+}
+
 .countdown-overlay {
   position: absolute;
   inset: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -716,6 +726,87 @@ input[type="range"] { width: 100%; }
   padding: 6px 7px;
 }
 
+.shooter-page .inventory-panel {
+  margin-top: 12px;
+}
+
+.shooter-page .inventory-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shooter-page .inventory-head h3 {
+  margin: 0;
+}
+
+.shooter-page .inventory-hints {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+}
+
+.shooter-page .inventory-hints span {
+  display: block;
+  white-space: nowrap;
+}
+
+.shooter-page .inv-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.shooter-page .inv-slot {
+  text-align: left;
+  padding: 10px 10px 9px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(2, 6, 23, 0.40);
+  color: rgba(248, 250, 252, 0.92);
+  cursor: pointer;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.shooter-page .inv-slot:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 40%, rgba(148, 163, 184, 0.18));
+  transform: translateY(-1px);
+}
+
+.shooter-page .inv-slot.active {
+  border-color: color-mix(in srgb, var(--s-accent) 65%, rgba(148, 163, 184, 0.18));
+  box-shadow: 0 0 0 2px rgba(25, 211, 255, 0.18) inset;
+}
+
+.shooter-page .inv-name {
+  font-weight: 750;
+  letter-spacing: 0.2px;
+  font-size: 13px;
+}
+
+.shooter-page .inv-qty {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.78);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shooter-page .inv-slot {
+    transition: none;
+  }
+  .shooter-page .inv-slot:hover {
+    transform: none;
+  }
+}
+
 .shooter-page .hud-row {
   display: flex;
   gap: 8px;
@@ -756,5 +847,89 @@ input[type="range"] { width: 100%; }
   .shooter-page button:hover,
   .shooter-page .auth-link-btn:hover {
     transform: none;
+  }
+}
+
+/* =========================
+   System announcements
+   ========================= */
+
+/* 画布内锚点（Portal）：相对画布左上角 */
+.sys-announce.sys-announce--canvas {
+  position: relative;
+  width: max-content;
+  max-width: min(500px, 100%);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-12px);
+  transition: opacity 170ms ease, transform 170ms ease;
+}
+
+.sys-announce.sys-announce--canvas.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* 非对战页：固定在视口左上角 */
+.sys-announce.sys-announce--viewport {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  width: max-content;
+  max-width: min(500px, calc(100vw - 24px));
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-12px);
+  transition: opacity 170ms ease, transform 170ms ease;
+  z-index: 2000;
+}
+
+.sys-announce.sys-announce--viewport.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.sys-announce-card {
+  position: relative;
+  padding: 12px 14px 11px;
+  border-radius: 11px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.94), rgba(2, 6, 23, 0.78));
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(10px);
+  text-align: left;
+}
+
+.sys-announce-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.38;
+  color: rgba(248, 250, 252, 0.96);
+}
+
+.sys-announce-subtitle {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.48;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.sys-announce.tone-good .sys-announce-card {
+  border-color: color-mix(in srgb, #34d399 45%, rgba(148, 163, 184, 0.22));
+}
+
+.sys-announce.tone-bad .sys-announce-card {
+  border-color: color-mix(in srgb, #fb7185 45%, rgba(148, 163, 184, 0.22));
+}
+
+.sys-announce.tone-info .sys-announce-card {
+  border-color: color-mix(in srgb, #19d3ff 45%, rgba(148, 163, 184, 0.22));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sys-announce.sys-announce--canvas,
+  .sys-announce.sys-announce--viewport {
+    transition: none;
   }
 }

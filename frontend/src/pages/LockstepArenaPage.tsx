@@ -1,136 +1,84 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { authMe, AUTH_TOKEN_STORAGE } from "../api";
-
-type NetInput = {
-  up: boolean;
-  down: boolean;
-  left: boolean;
-  right: boolean;
-  shoot: boolean;
-  aimX: number;
-  aimY: number;
-};
-
-type Player = {
-  id: string;
-  name: string;
-  color: string;
-  x: number;
-  y: number;
-  hp: number;
-  dir: number;
-  alive: boolean;
-  respawnAt: number;
-  cooldown: number;
-  prevShoot: boolean;
-  deaths: number;
-  lastProcessedInputSeq: number;
-};
-
-type Bullet = {
-  id: string;
-  owner: string;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  ttl: number;
-};
-
-type Explosion = {
-  x: number;
-  y: number;
-  born: number;
-};
-
-type Obstacle = { x: number; y: number; w: number; h: number };
-
-type World = {
-  width: number;
-  height: number;
-  obstacles: Obstacle[];
-};
-
-type RoomMeta = {
-  id: string;
-  ownerKey: string;
-  status: "idle" | "waiting" | "started";
-  playerCount: number;
-  maxPlayers: number;
-};
-
-const VIEW_W = 980;
-const VIEW_H = 620;
-const VIEW_ASPECT = VIEW_W / VIEW_H;
-const PLAYER_R = 14;
-const MAX_HP = 90;
-const MOVE_PER_FRAME = 5;
-const DEFAULT_TICK_MS = 50;
-const MAX_PENDING_INPUTS = 200;
-
-function clamp(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
-}
-
-function normalizeAngle(a: number) {
-  let x = a;
-  while (x > Math.PI) x -= Math.PI * 2;
-  while (x < -Math.PI) x += Math.PI * 2;
-  return x;
-}
-
-function circleRectHit(cx: number, cy: number, r: number, ob: Obstacle) {
-  const nx = clamp(cx, ob.x, ob.x + ob.w);
-  const ny = clamp(cy, ob.y, ob.y + ob.h);
-  const dx = cx - nx;
-  const dy = cy - ny;
-  return dx * dx + dy * dy <= r * r;
-}
-
-function collisionAt(x: number, y: number, world: World) {
-  if (x < PLAYER_R || y < PLAYER_R || x > world.width - PLAYER_R || y > world.height - PLAYER_R) return true;
-  return world.obstacles.some((ob) => circleRectHit(x, y, PLAYER_R, ob));
-}
-
-function parseRoom(raw: any): RoomMeta | null {
-  if (!raw?.room || !raw.room.id) return null;
-  return {
-    id: String(raw.room.id),
-    ownerKey: String(raw.room.ownerKey || ""),
-    status: raw.room.status === "started" ? "started" : raw.room.status === "waiting" ? "waiting" : "idle",
-    playerCount: Number(raw.room.playerCount || 0),
-    maxPlayers: Number(raw.room.maxPlayers || 5)
-  };
-}
-
-function parseRooms(raw: any): RoomMeta[] {
-  if (Array.isArray(raw?.rooms)) {
-    return raw.rooms
-      .filter((x: any) => x && x.id)
-      .map((x: any) => ({
-        id: String(x.id),
-        ownerKey: String(x.ownerKey || ""),
-        status: x.status === "started" ? "started" : x.status === "waiting" ? "waiting" : "idle",
-        playerCount: Number(x.playerCount || 0),
-        maxPlayers: Number(x.maxPlayers || 5)
-      }));
-  }
-  const single = parseRoom(raw);
-  return single ? [single] : [];
-}
+import { authMe, AUTH_TOKEN_STORAGE, lockstepWsUrl } from "../api";
+import { useSystemAnnouncer } from "../components/SystemAnnouncer";
+import {
+  isWsServerMessage,
+  WS_CLIENT_MSG,
+  WS_REJECT_REASON,
+  WS_ROOM_EVENT,
+  WS_SERVER_MSG,
+  type WsClientInputMessage,
+  type WsClientMessage,
+  type WsServerLobbyStateMessage,
+  type WsServerMessage,
+  type WsStateMessage
+} from "../../../shared/ws-protocol";
+import {
+  DEFAULT_BULLET_SPAWN_OFFSET,
+  DEFAULT_EXPLOSION_FX_FRAMES,
+  DEFAULT_RELOAD_DURATION_FRAMES,
+  DEFAULT_ROOM_MAX_PLAYERS,
+  DEFAULT_TICK_MS,
+  DEFAULT_WORLD_HEIGHT,
+  DEFAULT_WORLD_WIDTH,
+  INVENTORY_SIZE,
+  MAX_HP,
+  MAX_PENDING_INPUTS,
+  MOVE_PER_FRAME,
+  PLAYER_R,
+  VIEW_ASPECT,
+  VIEW_H,
+  VIEW_W,
+  clamp,
+  collisionAt,
+  drawKnifeArcFx,
+  drawReloadRing,
+  itemLabel,
+  normalizeAngle,
+  parseRoom,
+  parseRooms,
+  type Bullet,
+  type Drop,
+  type Explosion,
+  type KnifeArcFx,
+  type NetInput,
+  type Player,
+  type RoomMeta,
+  type World
+} from "./arena/shared";
 
 export default function LockstepArenaPage() {
   const navigate = useNavigate();
+  const { announce, registerAnnounceAnchor } = useSystemAnnouncer();
 
   const arenaWrapRef = useRef<HTMLDivElement | null>(null);
+  const announceAnchorRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const inputRef = useRef<NetInput>({ up: false, down: false, left: false, right: false, shoot: false, aimX: 0, aimY: 0 });
+  const inputRef = useRef<NetInput>({
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+    shoot: false,
+    aimX: 0,
+    aimY: 0,
+    slot: 0
+  });
   const playersRef = useRef<Map<string, Player>>(new Map());
   const bulletsRef = useRef<Bullet[]>([]);
   const explosionsRef = useRef<Explosion[]>([]);
-  const worldRef = useRef<World>({ width: 2000, height: 1200, obstacles: [] });
+  const knifeArcsRef = useRef<KnifeArcFx[]>([]);
+  const dropsRef = useRef<Drop[]>([]);
+  const worldRef = useRef<World>({
+    width: DEFAULT_WORLD_WIDTH,
+    height: DEFAULT_WORLD_HEIGHT,
+    obstacles: [],
+    reloadDurationFrames: DEFAULT_RELOAD_DURATION_FRAMES,
+    explosionFxFrames: DEFAULT_EXPLOSION_FX_FRAMES,
+    bulletSpawnOffset: DEFAULT_BULLET_SPAWN_OFFSET
+  });
   const selfIdRef = useRef<string>("");
   const localFrameRef = useRef(0);
   const canControlRef = useRef(true);
@@ -142,6 +90,9 @@ export default function LockstepArenaPage() {
   const pendingInputsRef = useRef<Array<{ seq: number; input: NetInput }>>([]);
   const aimInitializedRef = useRef(false);
   const roomMetaRef = useRef<RoomMeta | null>(null);
+
+  /** 递增以在「同一帧人数不变」时仍能刷新背包 UI（playersRef 变了但 playerCount 可能不变） */
+  const [invTick, setInvTick] = useState(0);
 
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("连接中...");
@@ -158,6 +109,14 @@ export default function LockstepArenaPage() {
   const [roomList, setRoomList] = useState<RoomMeta[]>([]);
   const [roomMeta, setRoomMeta] = useState<RoomMeta | null>(null);
   const [countdown, setCountdown] = useState<number>(0);
+  const [selectedInvIdx, setSelectedInvIdx] = useState<number>(0);
+  const selectedInvIdxRef = useRef(0);
+  useEffect(() => {
+    selectedInvIdxRef.current = selectedInvIdx;
+    inputRef.current.slot = selectedInvIdx;
+  }, [selectedInvIdx]);
+
+  const lastNoAmmoHintAtRef = useRef(0);
 
   const debugEnabled = useMemo(() => {
     try {
@@ -173,17 +132,20 @@ export default function LockstepArenaPage() {
     playersRef.current = new Map();
     bulletsRef.current = [];
     explosionsRef.current = [];
+    knifeArcsRef.current = [];
     selfIdRef.current = "";
     predictedSelfRef.current = null;
     pendingInputsRef.current = [];
     inputSeqRef.current = 0;
     aimInitializedRef.current = false;
-    inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, aimX: 0, aimY: 0 };
+    inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, aimX: 0, aimY: 0, slot: 0 };
     setPlayerCount(0);
     setQueueLen(0);
     setLatencyMs(0);
     setServerFrame(0);
     setLocalFrame(0);
+    setInvTick((t) => t + 1);
+    setSelectedInvIdx(0);
   };
 
   const inRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
@@ -193,14 +155,23 @@ export default function LockstepArenaPage() {
   const canStartGame = !!roomMeta && roomMeta.status === "waiting" && isOwner && roomMeta.playerCount >= 1;
   const showGame = inStartedRoom;
 
-  const sendWs = (payload: any) => {
+  useLayoutEffect(() => {
+    if (!showGame) {
+      registerAnnounceAnchor(null);
+      return;
+    }
+    registerAnnounceAnchor(announceAnchorRef.current);
+    return () => registerAnnounceAnchor(null);
+  }, [showGame, registerAnnounceAnchor]);
+
+  const sendWs = (payload: WsClientMessage) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(payload));
     return true;
   };
 
-  const queueAndSendInput = () => {
+  const queueAndSendInput = useCallback(() => {
     if (!showGame || countdown > 0) return;
     if (!selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
 
@@ -208,14 +179,35 @@ export default function LockstepArenaPage() {
     if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
 
     const seq = ++inputSeqRef.current;
-    const input: NetInput = { ...inputRef.current };
+    const input: NetInput = { ...inputRef.current, slot: selectedInvIdxRef.current };
     pendingInputsRef.current.push({ seq, input });
     if (pendingInputsRef.current.length > MAX_PENDING_INPUTS) {
       pendingInputsRef.current.splice(0, pendingInputsRef.current.length - MAX_PENDING_INPUTS);
     }
     setQueueLen(pendingInputsRef.current.length);
-    liveWs.send(JSON.stringify({ type: "input", seq, ...input }));
-  };
+    const payload: WsClientInputMessage = { type: WS_CLIENT_MSG.input, seq, ...input };
+    liveWs.send(JSON.stringify(payload));
+  }, [showGame, countdown]);
+
+  /** 枪械使用格内备弹数；弹尽时提示（节流） */
+  const warnIfGunDryFire = useCallback(() => {
+    const now = Date.now();
+    if (now - lastNoAmmoHintAtRef.current < 1800) return;
+    const me = playersRef.current.get(selfIdRef.current);
+    if (!me?.inv) return;
+    const slot = me.inv[selectedInvIdxRef.current];
+    const t = slot?.t;
+    if (t !== "gun_smg_9mm" && t !== "gun_ar_762") return;
+    const rounds = slot?.q ?? 0;
+    if (rounds > 0) return;
+    lastNoAmmoHintAtRef.current = now;
+    announce({
+      title: "无法开火",
+      subtitle: t === "gun_smg_9mm" ? "SMG 弹匣已空，拾取弹药补充至枪内或弹药格" : "步枪弹匣已空，拾取 7.62 弹药",
+      tone: "bad",
+      durationMs: 2200
+    });
+  }, [announce]);
 
   useEffect(() => {
     const resizeCanvas = () => {
@@ -275,12 +267,11 @@ export default function LockstepArenaPage() {
   useEffect(() => {
     if (!authUser || !authToken) return;
 
-    const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${wsProto}://${window.location.host}/ws/lockstep?token=${encodeURIComponent(authToken)}`);
+    const ws = new WebSocket(lockstepWsUrl(authToken));
     wsRef.current = ws;
     setStatus(`连接中，账号: ${authUser.username}`);
 
-    const updateLobby = (msg: any) => {
+    const updateLobby = (msg: WsServerLobbyStateMessage) => {
       const rooms = parseRooms(msg);
       setRoomList(rooms);
 
@@ -291,15 +282,22 @@ export default function LockstepArenaPage() {
       return { rooms, nextRoom };
     };
 
-    const applyState = (msg: any) => {
-      if (!Array.isArray(msg?.players)) return;
+    const applyState = (msg: WsStateMessage) => {
 
       const nextRoom = parseRoom(msg);
       roomMetaRef.current = nextRoom;
       setRoomMeta(nextRoom);
 
       if (msg.world && Array.isArray(msg.world.obstacles)) {
-        worldRef.current = msg.world;
+        const w = msg.world as World;
+        worldRef.current = {
+          width: Number(w.width || 0),
+          height: Number(w.height || 0),
+          obstacles: w.obstacles,
+          reloadDurationFrames: Number(w.reloadDurationFrames ?? DEFAULT_RELOAD_DURATION_FRAMES),
+          explosionFxFrames: Number(w.explosionFxFrames ?? DEFAULT_EXPLOSION_FX_FRAMES),
+          bulletSpawnOffset: Number(w.bulletSpawnOffset ?? DEFAULT_BULLET_SPAWN_OFFSET)
+        };
       }
 
       const next = new Map<string, Player>();
@@ -317,13 +315,30 @@ export default function LockstepArenaPage() {
           cooldown: Number(p.cooldown || 0),
           prevShoot: !!p.prevShoot,
           deaths: Number(p.deaths || 0),
-          lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0)
+          lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0),
+          inv: Array.isArray(p.inv)
+            ? (p.inv as Array<{ t?: string; q?: number } | null>).map((slot) =>
+                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
+              )
+            : undefined,
+          reloadEndFrame: Number(p.reloadEndFrame || 0),
+          reloadStartFrame: Number(p.reloadStartFrame || 0),
+          reloadSlotIdx: Number(p.reloadSlotIdx ?? -1)
         });
       }
 
       playersRef.current = next;
       bulletsRef.current = Array.isArray(msg.bullets) ? msg.bullets : [];
       explosionsRef.current = Array.isArray(msg.explosions) ? msg.explosions : [];
+      knifeArcsRef.current = Array.isArray(msg.knifeArcs)
+        ? (msg.knifeArcs as KnifeArcFx[]).map((k) => ({
+            x: Number(k.x || 0),
+            y: Number(k.y || 0),
+            dir: Number(k.dir || 0),
+            born: Number(k.born || 0)
+          }))
+        : [];
+      dropsRef.current = Array.isArray(msg.drops) ? msg.drops : [];
 
       const f = Number(msg.frame || 0);
       localFrameRef.current = f;
@@ -331,6 +346,7 @@ export default function LockstepArenaPage() {
       setServerFrame(f);
       setPlayerCount(next.size);
       setLatencyMs(Math.max(0, Date.now() - Number(msg.serverTime || Date.now())));
+      setInvTick((t) => t + 1);
 
       const self = next.get(selfIdRef.current);
       if (self) {
@@ -369,14 +385,23 @@ export default function LockstepArenaPage() {
         setQueueLen(0);
       }
 
-      if (msg.reason === "game_started") {
+      if (msg.reason === WS_ROOM_EVENT.gameStarted) {
         setCountdown(3);
+      }
+
+      if (msg.reason === WS_ROOM_EVENT.dropWave) {
+        announce({ title: "空投已抵达", subtitle: "附近有新物资", tone: "info", durationMs: 1400 });
       }
     };
 
     ws.onopen = () => {
       setConnected(true);
-      ws.send(JSON.stringify({ type: "auth", playerKey: `u_${authUser.id}`, playerName: authUser.username }));
+      const authPayload: WsClientMessage = {
+        type: WS_CLIENT_MSG.auth,
+        playerKey: `u_${authUser.id}`,
+        playerName: authUser.username
+      };
+      ws.send(JSON.stringify(authPayload));
       tickMsRef.current = DEFAULT_TICK_MS;
       inputSeqRef.current = 0;
       pendingInputsRef.current = [];
@@ -395,41 +420,56 @@ export default function LockstepArenaPage() {
     };
 
     ws.onmessage = (ev) => {
-      let msg: any = null;
+      let parsed: unknown = null;
       try {
-        msg = JSON.parse(ev.data);
+        parsed = JSON.parse(ev.data);
       } catch {
         return;
       }
+      if (!isWsServerMessage(parsed)) return;
+      const msg: WsServerMessage = parsed;
 
-      if (msg.type === "reject") {
+      if (msg.type === WS_SERVER_MSG.reject) {
+        const roomCap = Number(msg.maxPlayers || DEFAULT_ROOM_MAX_PLAYERS);
         const reasonMap: Record<string, string> = {
-          room_full: "房间已满（最多 5 人）",
-          room_exists: "已有房间，请加入当前房间",
-          room_not_found: "房间不存在",
-          not_owner: "只有房主可以开始",
-          already_started: "游戏已开始",
-          already_in_room: "你已在房间中"
+          [WS_REJECT_REASON.roomFull]: `房间已满（最多 ${roomCap} 人）`,
+          [WS_REJECT_REASON.roomExists]: "已有房间，请加入当前房间",
+          [WS_REJECT_REASON.roomNotFound]: "房间不存在",
+          [WS_REJECT_REASON.notOwner]: "只有房主可以开始",
+          [WS_REJECT_REASON.alreadyStarted]: "游戏已开始",
+          [WS_REJECT_REASON.alreadyInRoom]: "你已在房间中",
+          [WS_REJECT_REASON.invFull]: "物品栏已满",
+          [WS_REJECT_REASON.itemLocked]: "无法丢弃该物品",
+          [WS_REJECT_REASON.notInRoom]: "未在房间内",
+          [WS_REJECT_REASON.unauthorized]: "登录已失效，请重新登录"
         };
-        setStatus(reasonMap[msg.reason] || `请求被拒绝: ${msg.reason || "unknown"}`);
+        const text = reasonMap[msg.reason] || `请求被拒绝: ${msg.reason || "unknown"}`;
+        setStatus(text);
+        announce({ title: "系统提示", subtitle: text, tone: "bad", durationMs: 1600 });
         return;
       }
 
-      if (msg.type === "need_auth") {
-        ws.send(JSON.stringify({ type: "auth", playerKey: `u_${authUser.id}`, playerName: authUser.username }));
+      if (msg.type === WS_SERVER_MSG.needAuth) {
+        const authPayload: WsClientMessage = {
+          type: WS_CLIENT_MSG.auth,
+          playerKey: `u_${authUser.id}`,
+          playerName: authUser.username
+        };
+        ws.send(JSON.stringify(authPayload));
         return;
       }
 
-      if (msg.type === "welcome") {
+      if (msg.type === WS_SERVER_MSG.welcome) {
         selfIdRef.current = msg.id;
         tickMsRef.current = Number(msg.tickMs || DEFAULT_TICK_MS);
         applyState(msg.snapshot);
         const started = msg?.snapshot?.room?.status === "started";
         setStatus(started ? "游戏开始" : "已加入房间，等待开始");
+        announce({ title: started ? "战局开始" : "已加入房间", subtitle: started ? "祝你好运" : "等待房主开局", tone: "info", durationMs: 1200 });
         return;
       }
 
-      if (msg.type === "lobby_state") {
+      if (msg.type === WS_SERVER_MSG.lobbyState) {
         const { rooms, nextRoom } = updateLobby(msg);
         const currentlyInRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
         const sameRoom = !!nextRoom && !!roomMetaRef.current && nextRoom.id === roomMetaRef.current.id;
@@ -440,7 +480,7 @@ export default function LockstepArenaPage() {
         return;
       }
 
-      if (msg.type === "snapshot" || msg.type === "state") {
+      if (msg.type === WS_SERVER_MSG.snapshot || msg.type === WS_SERVER_MSG.state) {
         applyState(msg);
       }
     };
@@ -460,9 +500,57 @@ export default function LockstepArenaPage() {
     const iv = setInterval(() => {
       if (!canControlRef.current) return;
       queueAndSendInput();
-    }, 50);
+    }, DEFAULT_TICK_MS);
     return () => clearInterval(iv);
-  }, [countdown, showGame]);
+  }, [countdown, showGame, queueAndSendInput]);
+
+  const nearestDrop = useMemo(() => {
+    return () => {
+      const me = playersRef.current.get(selfIdRef.current);
+      if (!me) return null;
+      let best: Drop | null = null;
+      let bestD2 = Infinity;
+      for (const d of dropsRef.current) {
+        const d2 = (me.x - d.x) * (me.x - d.x) + (me.y - d.y) * (me.y - d.y);
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          best = d;
+        }
+      }
+      return best;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!showGame) return;
+      if (e.repeat) return;
+      const digit = e.key;
+      if (digit >= "1" && digit <= String(INVENTORY_SIZE) && digit.length === 1) {
+        setSelectedInvIdx(Number(digit) - 1);
+        e.preventDefault();
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "e") {
+        const d = nearestDrop();
+        if (!d) return;
+        sendWs({ type: WS_CLIENT_MSG.pickup, dropId: d.id });
+      }
+      if (key === "g") {
+        const me = playersRef.current.get(selfIdRef.current);
+        const slot = me?.inv?.[selectedInvIdx];
+        if (!slot) return;
+        if (slot.t === "knife") {
+          announce({ title: "无法丢弃", subtitle: "匕首为默认物品", tone: "bad", durationMs: 1200 });
+          return;
+        }
+        sendWs({ type: WS_CLIENT_MSG.dropItem, slotIdx: selectedInvIdx });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [announce, nearestDrop, selectedInvIdx, showGame]);
 
   useEffect(() => {
     const updateControl = () => {
@@ -490,7 +578,7 @@ export default function LockstepArenaPage() {
       window.removeEventListener("blur", updateControl);
       document.removeEventListener("visibilitychange", updateControl);
     };
-  }, [showGame]);
+  }, [showGame, queueAndSendInput]);
 
   useEffect(() => {
     let raf = 0;
@@ -522,6 +610,7 @@ export default function LockstepArenaPage() {
       const players = playersRef.current;
       const bullets = bulletsRef.current;
       const explosions = explosionsRef.current;
+      const knifeArcs = knifeArcsRef.current;
       const self = players.get(selfIdRef.current);
       const predSelf = predictedSelfRef.current;
       const view = viewportRef.current;
@@ -592,6 +681,27 @@ export default function LockstepArenaPage() {
         ctx.strokeRect(ob.x, ob.y, ob.w, ob.h);
       }
 
+      // drops (world space)
+      for (const d of dropsRef.current) {
+        const tone = d.t.startsWith("gun_")
+          ? "#fbbf24"
+          : d.t.startsWith("armor_")
+            ? "#60a5fa"
+            : d.t.startsWith("boots_")
+              ? "#a78bfa"
+              : d.t.startsWith("ammo_")
+                ? "#34d399"
+                : "#19d3ff";
+        ctx.fillStyle = tone;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.font = "11px Menlo";
+        const label = `${itemLabel(d.t)}${d.q > 1 ? ` x${d.q}` : ""}`;
+        ctx.fillText(label, d.x + 10, d.y + 4);
+      }
+
       for (const b of bullets) {
         ctx.strokeStyle = "rgba(255,220,130,0.35)";
         ctx.beginPath();
@@ -627,7 +737,8 @@ export default function LockstepArenaPage() {
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(drawX, drawY);
-        ctx.lineTo(drawX + Math.cos(normalizeAngle(drawDir)) * 20, drawY + Math.sin(normalizeAngle(drawDir)) * 20);
+        const muzzleLen = Number(world.bulletSpawnOffset || DEFAULT_BULLET_SPAWN_OFFSET);
+        ctx.lineTo(drawX + Math.cos(normalizeAngle(drawDir)) * muzzleLen, drawY + Math.sin(normalizeAngle(drawDir)) * muzzleLen);
         ctx.stroke();
 
         ctx.globalAlpha = 1;
@@ -641,16 +752,30 @@ export default function LockstepArenaPage() {
           ctx.fillRect(drawX - hpW / 2, drawY - 28, hpW, 4);
           ctx.fillStyle = "#62d266";
           ctx.fillRect(drawX - hpW / 2, drawY - 28, (hpW * p.hp) / MAX_HP, 4);
+
+          const rf = localFrameRef.current;
+          const rEnd = p.reloadEndFrame ?? 0;
+          const rStart = p.reloadStartFrame ?? 0;
+          if (rEnd > 0 && rStart >= 0 && rf < rEnd && rEnd > rStart) {
+            const prog = (rf - rStart) / (rEnd - rStart);
+            drawReloadRing(ctx, drawX + PLAYER_R + 10, drawY - PLAYER_R - 8, prog);
+          }
         } else {
           const remain = Math.max(0, p.respawnAt - localFrameRef.current);
+          const remainSeconds = (remain * Math.max(1, tickMsRef.current)) / 1000;
           ctx.fillStyle = "#ffd28f";
-          ctx.fillText(`Respawn ${(remain / 20).toFixed(1)}s`, drawX - 34, drawY - 28);
+          ctx.fillText(`Respawn ${remainSeconds.toFixed(1)}s`, drawX - 34, drawY - 28);
         }
+      }
+
+      for (const ka of knifeArcs) {
+        drawKnifeArcFx(ctx, ka, localFrameRef.current);
       }
 
       for (const e of explosions) {
         const age = localFrameRef.current - e.born;
-        const t = clamp(age / 15, 0, 1);
+        const explosionFxFrames = Number(world.explosionFxFrames || DEFAULT_EXPLOSION_FX_FRAMES);
+        const t = clamp(age / explosionFxFrames, 0, 1);
         const r = 6 + 22 * t;
         ctx.strokeStyle = `rgba(255, 166, 95, ${1 - t})`;
         ctx.lineWidth = 2;
@@ -671,6 +796,13 @@ export default function LockstepArenaPage() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!authUser || !showGame || countdown > 0) return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        inputRef.current.shoot = true;
+        warnIfGunDryFire();
+        queueAndSendInput();
+        return;
+      }
       if (e.key === "w" || e.key === "W") inputRef.current.up = true;
       if (e.key === "s" || e.key === "S") inputRef.current.down = true;
       if (e.key === "a" || e.key === "A") inputRef.current.left = true;
@@ -679,6 +811,12 @@ export default function LockstepArenaPage() {
 
     const onKeyUp = (e: KeyboardEvent) => {
       if (!authUser || !showGame) return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        inputRef.current.shoot = false;
+        queueAndSendInput();
+        return;
+      }
       if (e.key === "w" || e.key === "W") inputRef.current.up = false;
       if (e.key === "s" || e.key === "S") inputRef.current.down = false;
       if (e.key === "a" || e.key === "A") inputRef.current.left = false;
@@ -691,7 +829,7 @@ export default function LockstepArenaPage() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [authUser, countdown, showGame]);
+  }, [authUser, countdown, showGame, queueAndSendInput, warnIfGunDryFire]);
 
   const onMouseMove: React.MouseEventHandler<HTMLCanvasElement> = (e) => {
     if (!showGame || !authUser || !selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
@@ -718,22 +856,22 @@ export default function LockstepArenaPage() {
   };
 
   const createRoom = () => {
-    if (!sendWs({ type: "create_room" })) return;
+    if (!sendWs({ type: WS_CLIENT_MSG.createRoom })) return;
     setStatus("正在创建房间...");
   };
 
   const joinRoom = (id: string) => {
-    if (!sendWs({ type: "join_room", roomId: id })) return;
+    if (!sendWs({ type: WS_CLIENT_MSG.joinRoom, roomId: id })) return;
     setStatus(`正在加入房间 ${id}...`);
   };
 
   const startGame = () => {
-    if (!sendWs({ type: "start_game" })) return;
+    if (!sendWs({ type: WS_CLIENT_MSG.startGame })) return;
     setStatus("房主正在开始游戏...");
   };
 
   const leaveRoom = () => {
-    if (!sendWs({ type: "leave" })) return;
+    if (!sendWs({ type: WS_CLIENT_MSG.leave })) return;
     clearLocalRoomState();
     setStatus("已退出游戏，回到大厅");
   };
@@ -764,6 +902,14 @@ export default function LockstepArenaPage() {
         me: p.id === selfIdRef.current
       }));
   }, [playerCount, localFrame]);
+
+  const invSlots = useMemo(() => {
+    const me = playersRef.current.get(selfIdRef.current);
+    const inv = me?.inv || [];
+    const out: Array<{ t: string; q: number } | null> = [];
+    for (let i = 0; i < INVENTORY_SIZE; i += 1) out.push(inv[i] || null);
+    return out;
+  }, [playerCount, localFrame, invTick]);
 
   if (authChecking) {
     return (
@@ -894,18 +1040,31 @@ export default function LockstepArenaPage() {
                 height={VIEW_H}
                 className="arena-canvas"
                 tabIndex={0}
-                aria-label="对战画布（WASD 移动，鼠标瞄准/射击）"
+                aria-label="对战画布（WASD 移动，空格或鼠标攻击，鼠标瞄准）"
                 onMouseMove={onMouseMove}
-                onMouseDown={() => {
-                  if (countdown === 0) inputRef.current.shoot = true;
+                onPointerDown={(e) => {
+                  if (countdown !== 0) return;
+                  e.preventDefault();
+                  (e.target as HTMLCanvasElement).setPointerCapture?.(e.pointerId);
+                  inputRef.current.shoot = true;
+                  warnIfGunDryFire();
+                  queueAndSendInput();
                 }}
-                onMouseUp={() => {
+                onPointerUp={(e) => {
+                  e.preventDefault();
                   inputRef.current.shoot = false;
+                  queueAndSendInput();
                 }}
-                onMouseLeave={() => {
+                onPointerCancel={(e) => {
                   inputRef.current.shoot = false;
+                  queueAndSendInput();
+                }}
+                onPointerLeave={() => {
+                  inputRef.current.shoot = false;
+                  queueAndSendInput();
                 }}
               />
+              <div ref={announceAnchorRef} className="arena-announce-mount" aria-hidden />
               {countdown > 0 && <div className="countdown-overlay">{countdown}</div>}
             </div>
 
@@ -931,6 +1090,37 @@ export default function LockstepArenaPage() {
                   ))}
                 </tbody>
               </table>
+
+              <div className="inventory-panel" aria-label="物品栏">
+                <div className="inventory-head">
+                  <h3>物品栏</h3>
+                  <div className="inventory-hints muted" aria-label="物品栏操作说明">
+                    <span>E 拾取</span>
+                    <span>1–8 选格</span>
+                    <span>G 丢弃</span>
+                    <span>空格 / 鼠标攻击</span>
+                    <span>枪械数字为剩余弹量</span>
+                  </div>
+                </div>
+                <div className="inv-grid">
+                  {invSlots.map((s, idx) => {
+                    const active = idx === selectedInvIdx;
+                    const cls = active ? "inv-slot active" : "inv-slot";
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        className={cls}
+                        onClick={() => setSelectedInvIdx(idx)}
+                        aria-pressed={active}
+                      >
+                        <div className="inv-name">{s ? itemLabel(s.t) : "空"}</div>
+                        {s && s.q > 1 ? <div className="inv-qty">x{s.q}</div> : <div className="inv-qty muted">{idx + 1}</div>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </aside>
           </div>
 

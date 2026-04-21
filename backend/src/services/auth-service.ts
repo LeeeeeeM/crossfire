@@ -1,19 +1,20 @@
 import { randomBytes } from "node:crypto";
 import { pool } from "./db";
+import { VALIDATION_CONFIG, isValidPassword, isValidUsername } from "../config/validation-config";
 
 export type AuthUser = {
   id: string;
   username: string;
 };
 
-const SESSION_TTL_DAYS = 30;
+const SESSION_TTL_DAYS = VALIDATION_CONFIG.sessionTtlDays;
 
 export function validateUsername(username: string) {
-  return /^[a-zA-Z0-9_]{3,24}$/.test(username);
+  return isValidUsername(username);
 }
 
 export function validatePassword(password: string) {
-  return password.length >= 6 && password.length <= 128;
+  return isValidPassword(password);
 }
 
 async function createSession(userId: string) {
