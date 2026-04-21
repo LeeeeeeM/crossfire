@@ -1,4 +1,4 @@
-import type { InputState, RoomMeta, RoomPlayer, RoomState } from "../models/server-types";
+import type { InputState, InventorySlot, RoomMeta, RoomPlayer, RoomState } from "../models/server-types";
 import { WS_REJECT_REASON, WS_ROOM_EVENT, WS_STATE_TYPE } from "../../../shared/ws-protocol";
 
 type CreateRoomServiceContext = {
@@ -11,7 +11,8 @@ type CreateRoomServiceContext = {
   obstacles: Array<{ x: number; y: number; w: number; h: number }>;
   maxPlayers: number;
   maxHp: number;
-  inventorySize: number;
+  weaponSlotSize: number;
+  itemSlotSize: number;
   dropIntervalFrames: number;
   reloadDurationFrames: number;
   explosionFxFrames: number;
@@ -19,6 +20,8 @@ type CreateRoomServiceContext = {
   defaultInput: () => InputState;
   spawnFor: (player: RoomPlayer) => { x: number; y: number };
   clearReloadState: (p: RoomPlayer) => void;
+  initialWeapons: () => Array<InventorySlot | null>;
+  initialItems: () => Array<InventorySlot | null>;
   broadcastSnapshot: (room: RoomState, reason: string) => void;
   broadcastLobbyState: () => void;
   collisionAt: (x: number, y: number) => boolean;
@@ -59,9 +62,12 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
       respawnAt: p.respawnAt,
       cooldown: p.cooldown,
       prevShoot: p.prevShoot,
+      prevReload: p.prevReload,
       deaths: p.deaths,
       lastProcessedInputSeq: p.lastProcessedInputSeq,
-      inv: p.inv,
+      weapons: p.weapons,
+      items: p.items,
+      inv: [...p.weapons, ...p.items],
       reloadEndFrame: p.reloadEndFrame || 0,
       reloadStartFrame: p.reloadStartFrame || 0,
       reloadSlotIdx: p.reloadSlotIdx ?? -1
@@ -113,8 +119,10 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
       respawnAt: 0,
       cooldown: 0,
       prevShoot: false,
+      prevReload: false,
       deaths: 0,
-      inv: Array.from({ length: ctx.inventorySize }, (_, i) => (i === 0 ? { t: "knife", q: 1 } : null)),
+      weapons: ctx.initialWeapons(),
+      items: ctx.initialItems(),
       input: ctx.defaultInput(),
       lastInputAt: Date.now(),
       lastProcessedInputSeq: 0,
@@ -182,11 +190,13 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
       p.respawnAt = 0;
       p.cooldown = 0;
       p.prevShoot = false;
+      p.prevReload = false;
       p.deaths = 0;
       p.input = ctx.defaultInput();
       p.lastInputAt = Date.now();
       ctx.clearReloadState(p);
-      p.inv = Array.from({ length: ctx.inventorySize }, (_, i) => (i === 0 ? { t: "knife", q: 1 } : null));
+      p.weapons = ctx.initialWeapons();
+      p.items = ctx.initialItems();
       const s = ctx.spawnFor(p);
       p.x = s.x;
       p.y = s.y;

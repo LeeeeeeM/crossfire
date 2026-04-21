@@ -4,6 +4,7 @@ export type NetInput = {
   left: boolean;
   right: boolean;
   shoot: boolean;
+  reload: boolean;
   aimX: number;
   aimY: number;
   slot: number;
@@ -23,6 +24,8 @@ export type Player = {
   prevShoot: boolean;
   deaths: number;
   lastProcessedInputSeq: number;
+  weapons?: Array<{ t: string; q: number } | null>;
+  items?: Array<{ t: string; q: number } | null>;
   inv?: Array<{ t: string; q: number } | null>;
   reloadEndFrame?: number;
   reloadStartFrame?: number;
@@ -89,7 +92,9 @@ export const MAX_HP = 90;
 export const MOVE_PER_FRAME = 5;
 export const DEFAULT_TICK_MS = 50;
 export const DEFAULT_ROOM_MAX_PLAYERS = 5;
-export const INVENTORY_SIZE = 8;
+export const WEAPON_SLOT_SIZE = 3;
+export const ITEM_SLOT_SIZE = 5;
+export const INVENTORY_SIZE = WEAPON_SLOT_SIZE + ITEM_SLOT_SIZE;
 export const MAX_PENDING_INPUTS = 200;
 export const KNIFE_ARC_HALF_RAD = Math.PI / 3;
 export const KNIFE_MELEE_RANGE = 52;
@@ -110,7 +115,10 @@ export const ITEM_LABELS: Record<string, string> = {
   boots_mid: "中鞋",
   boots_heavy: "重鞋",
   gun_smg_9mm: "SMG(9)",
-  gun_ar_762: "AR(7.62)"
+  gun_ar_762: "AR(7.62)",
+  gun_ak_762: "AK(7.62)",
+  gun_sniper_762: "Sniper(7.62)",
+  gun_m9_9mm: "M9(9)"
 };
 
 export function itemLabel(t: string) {

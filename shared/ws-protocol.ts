@@ -88,6 +88,8 @@ export type WsPlayerPayload = {
   prevShoot: boolean;
   deaths: number;
   lastProcessedInputSeq: number;
+  weapons?: WsInventorySlotPayload[];
+  items?: WsInventorySlotPayload[];
   inv?: WsInventorySlotPayload[];
   reloadEndFrame?: number;
   reloadStartFrame?: number;
@@ -103,7 +105,7 @@ export type WsWorldPayload = {
   bulletSpawnOffset?: number;
 };
 
-export type WsBulletPayload = { id: string; owner: string; x: number; y: number; vx: number; vy: number; ttl: number };
+export type WsBulletPayload = { id: string; owner: string; x: number; y: number; vx: number; vy: number; ttl: number; damage?: number };
 export type WsExplosionPayload = { x: number; y: number; born: number };
 export type WsKnifeArcPayload = { x: number; y: number; dir: number; born: number };
 export type WsDropPayload = { id: string; t: string; x: number; y: number; q: number; born: number };
@@ -168,12 +170,13 @@ export type WsClientInputMessage = {
   left: boolean;
   right: boolean;
   shoot: boolean;
+  reload: boolean;
   aimX: number;
   aimY: number;
   slot: number;
 };
 export type WsClientPickupMessage = { type: (typeof WS_CLIENT_MSG)["pickup"]; dropId: string };
-export type WsClientDropItemMessage = { type: (typeof WS_CLIENT_MSG)["dropItem"]; slotIdx: number; qty?: number };
+export type WsClientDropItemMessage = { type: (typeof WS_CLIENT_MSG)["dropItem"]; slotIdx: number; section?: "weapon" | "item"; qty?: number };
 
 export type WsClientMessage =
   | WsClientAuthMessage

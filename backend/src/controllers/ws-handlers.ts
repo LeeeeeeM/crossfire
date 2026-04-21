@@ -19,7 +19,8 @@ type WsHandlerContext = {
   playerToRoom: Map<string, string>;
   rooms: Map<string, RoomState>;
   maxPlayers: number;
-  inventorySize: number;
+  weaponSlotSize: number;
+  itemSlotSize: number;
   pickupRadius: number;
   reconnectGraceMs: number;
   dropThrowOffset: number;
@@ -42,11 +43,12 @@ type WsHandlerContext = {
   removePlayerFromRoom: (room: RoomState, playerKey: string, reason: string) => void;
   clamp: (v: number, min: number, max: number) => number;
   collisionAt: (x: number, y: number) => boolean;
-  invCanTakeAmmoPickup: (inv: Array<InventorySlot | null>, ammoType: ItemType) => boolean;
-  invHasSpaceFor: (inv: Array<InventorySlot | null>, itemType: ItemType) => boolean;
-  invApplyAmmoPickup: (inv: Array<InventorySlot | null>, ammoType: ItemType, qty: number) => number;
-  invAdd: (inv: Array<InventorySlot | null>, itemType: ItemType, qty: number) => number;
-  invRemoveAt: (inv: Array<InventorySlot | null>, idx: number, qty?: number) => InventorySlot | null;
+  canTakeAmmoPickup: (weapons: Array<InventorySlot | null>, items: Array<InventorySlot | null>, ammoType: ItemType) => boolean;
+  hasSpaceForPickup: (weapons: Array<InventorySlot | null>, items: Array<InventorySlot | null>, itemType: ItemType) => boolean;
+  applyAmmoPickup: (weapons: Array<InventorySlot | null>, items: Array<InventorySlot | null>, ammoType: ItemType, qty: number) => number;
+  addPickup: (weapons: Array<InventorySlot | null>, items: Array<InventorySlot | null>, itemType: ItemType, qty: number) => number;
+  removeWeaponAt: (weapons: Array<InventorySlot | null>, idx: number, qty?: number) => InventorySlot | null;
+  removeItemAt: (items: Array<InventorySlot | null>, idx: number, qty?: number) => InventorySlot | null;
 };
 
 const AMMO_PICKUP_TYPES = new Set<ItemType>(["ammo_9mm", "ammo_762"]);
@@ -211,9 +213,10 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
           left: !!msg.left,
           right: !!msg.right,
           shoot: !!msg.shoot,
+          reload: !!msg.reload,
           aimX: Number(msg.aimX),
           aimY: Number(msg.aimY),
-          slot: ctx.clamp(Math.floor(Number(msg.slot)), 0, ctx.inventorySize - 1)
+          slot: ctx.clamp(Math.floor(Number(msg.slot)), 0, ctx.weaponSlotSize - 1)
         };
         p.lastInputAt = Date.now();
         p.lastProcessedInputSeq = seq;
@@ -228,16 +231,18 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
         const dist2 = (p.x - d.x) * (p.x - d.x) + (p.y - d.y) * (p.y - d.y);
         if (dist2 > ctx.pickupRadius * ctx.pickupRadius) return;
         if (isAmmoPickupType(d.t)) {
-          if (!ctx.invCanTakeAmmoPickup(p.inv, d.t)) {
+          if (!ctx.canTakeAmmoPickup(p.weapons, p.items, d.t)) {
             sendReject(ws, WS_REJECT_REASON.invFull);
             return;
           }
-        } else if (!ctx.invHasSpaceFor(p.inv, d.t)) {
+        } else if (!ctx.hasSpaceForPickup(p.weapons, p.items, d.t)) {
           sendReject(ws, WS_REJECT_REASON.invFull);
           return;
         }
 
-        const rem = isAmmoPickupType(d.t) ? ctx.invApplyAmmoPickup(p.inv, d.t, d.q) : ctx.invAdd(p.inv, d.t, d.q);
+        const rem = isAmmoPickupType(d.t)
+          ? ctx.applyAmmoPickup(p.weapons, p.items, d.t, d.q)
+          : ctx.addPickup(p.weapons, p.items, d.t, d.q);
         if (rem > 0) {
           d.q = rem;
         } else {
@@ -250,8 +255,13 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
       if (msg.type === WS_CLIENT_MSG.dropItem) {
         if (!room || room.status !== "started") return;
         const idx = Number(msg.slotIdx);
-        if (!Number.isFinite(idx) || idx < 0 || idx >= ctx.inventorySize) return;
-        const removed = ctx.invRemoveAt(p.inv, idx, Number(msg.qty || 0) || undefined);
+        const section = msg.section === "item" ? "item" : "weapon";
+        const slotCap = section === "weapon" ? ctx.weaponSlotSize : ctx.itemSlotSize;
+        if (!Number.isFinite(idx) || idx < 0 || idx >= slotCap) return;
+        const removed =
+          section === "weapon"
+            ? ctx.removeWeaponAt(p.weapons, idx, Number(msg.qty || 0) || undefined)
+            : ctx.removeItemAt(p.items, idx, Number(msg.qty || 0) || undefined);
         if (!removed) {
           sendReject(ws, WS_REJECT_REASON.itemLocked);
           return;

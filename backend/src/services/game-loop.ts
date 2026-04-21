@@ -1,5 +1,5 @@
 import { applyKnifeMelee } from "./combat-service";
-import { GUN_FIRE_COOLDOWN, clearReloadState, tryCompleteReload, tryStartAutoReload } from "./inventory-service";
+import { clearReloadState, gunStat, isGunItem, tryCompleteReload, tryStartAutoReload, tryStartManualReload } from "./inventory-service";
 import { pickDropLootByRatio, resolveDropQty } from "../data/drop-loot-table";
 import type { RoomPlayer, RoomState } from "../models/server-types";
 import { WS_ROOM_EVENT, WS_STATE_TYPE, wsRoomReason } from "../../../shared/ws-protocol";
@@ -16,6 +16,10 @@ type GameLoopContext = {
   dropSpawnAttempts: number;
   dropRandomSaltMod: number;
   magSmg9mm: number;
+  magAr762: number;
+  magAk762: number;
+  magSniper762: number;
+  magM9: number;
   playerRadius: number;
   worldWidth: number;
   worldHeight: number;
@@ -23,15 +27,11 @@ type GameLoopContext = {
   movePerFrame: number;
   maxHp: number;
   knifeCooldownFrames: number;
-  bulletSpeed: number;
-  bulletTtl: number;
   bulletSpawnOffset: number;
   bulletHitRadiusPadding: number;
   explosionFxFrames: number;
-  defaultGunCooldownFrames: number;
-  damage: number;
   respawnFrames: number;
-  inventorySize: number;
+  weaponSlotSize: number;
   knifeArcFxFrames: number;
   collisionAt: (x: number, y: number) => boolean;
   clearActionInputKeepAim: (input: RoomPlayer["input"]) => RoomPlayer["input"];
@@ -59,7 +59,13 @@ export function startGameLoop(ctx: GameLoopContext) {
         for (let i = 0; i < batch && room.drops.length < ctx.maxDrops; i += 1) {
           const r = (Math.random() + (room.frame % randomSaltMod) / randomSaltMod) % 1;
           const pick = pickDropLootByRatio(r);
-          const qty = resolveDropQty(pick.qty, ctx.magSmg9mm);
+          const qty = resolveDropQty(pick.qty, {
+            smg9mm: ctx.magSmg9mm,
+            ar762: ctx.magAr762,
+            ak762: ctx.magAk762,
+            sniper762: ctx.magSniper762,
+            m9: ctx.magM9
+          });
           let x = 0;
           let y = 0;
           for (let t = 0; t < spawnAttempts; t += 1) {
@@ -104,6 +110,7 @@ export function startGameLoop(ctx: GameLoopContext) {
             p.alive = true;
             p.cooldown = 0;
             p.prevShoot = false;
+            p.prevReload = false;
             clearReloadState(p);
           }
           continue;
@@ -131,8 +138,12 @@ export function startGameLoop(ctx: GameLoopContext) {
         if (p.cooldown > 0) p.cooldown -= 1;
         const shootEdge = input.shoot && !p.prevShoot;
         const rawSlot = Number(input.slot);
-        const selIdx = ctx.clamp(Number.isFinite(rawSlot) ? Math.floor(rawSlot) : 0, 0, ctx.inventorySize - 1);
-        const selWeapon = p.inv[selIdx];
+        const selIdx = ctx.clamp(Number.isFinite(rawSlot) ? Math.floor(rawSlot) : 0, 0, ctx.weaponSlotSize - 1);
+        const selWeapon = p.weapons[selIdx];
+        const reloadEdge = input.reload && !p.prevReload;
+        if (reloadEdge && selWeapon && isGunItem(selWeapon.t)) {
+          tryStartManualReload(p, room, selIdx);
+        }
         if (shootEdge && p.cooldown <= 0 && selWeapon) {
           if (selWeapon.t === "knife") {
             applyKnifeMelee(p, room, ids, clearReloadState);
@@ -143,7 +154,8 @@ export function startGameLoop(ctx: GameLoopContext) {
               born: room.frame
             });
             p.cooldown = ctx.knifeCooldownFrames;
-          } else if (selWeapon.t === "gun_smg_9mm" || selWeapon.t === "gun_ar_762") {
+          } else if (isGunItem(selWeapon.t)) {
+            const stat = gunStat(selWeapon.t);
             if (selWeapon.q > 0) {
               selWeapon.q -= 1;
               room.bullets.push({
@@ -151,11 +163,12 @@ export function startGameLoop(ctx: GameLoopContext) {
                 owner: p.id,
                 x: p.x + Math.cos(p.dir) * ctx.bulletSpawnOffset,
                 y: p.y + Math.sin(p.dir) * ctx.bulletSpawnOffset,
-                vx: Math.cos(p.dir) * ctx.bulletSpeed,
-                vy: Math.sin(p.dir) * ctx.bulletSpeed,
-                ttl: ctx.bulletTtl
+                vx: Math.cos(p.dir) * stat.bulletSpeed,
+                vy: Math.sin(p.dir) * stat.bulletSpeed,
+                ttl: stat.bulletTtl,
+                damage: stat.damage
               });
-              p.cooldown = GUN_FIRE_COOLDOWN[selWeapon.t] || ctx.defaultGunCooldownFrames;
+              p.cooldown = stat.fireCooldownFrames;
               if (selWeapon.q === 0) {
                 tryStartAutoReload(p, room, selIdx);
               }
@@ -165,6 +178,7 @@ export function startGameLoop(ctx: GameLoopContext) {
           }
         }
         p.prevShoot = input.shoot;
+        p.prevReload = input.reload;
       }
 
       for (let i = room.bullets.length - 1; i >= 0; i -= 1) {
@@ -196,7 +210,7 @@ export function startGameLoop(ctx: GameLoopContext) {
 
             const d2 = (p.x - b.x) * (p.x - b.x) + (p.y - b.y) * (p.y - b.y);
             if (d2 <= (ctx.playerRadius + ctx.bulletHitRadiusPadding) * (ctx.playerRadius + ctx.bulletHitRadiusPadding)) {
-              p.hp -= ctx.damage;
+              p.hp -= b.damage;
               room.explosions.push({ x: b.x, y: b.y, born: room.frame });
               if (p.hp <= 0) {
                 p.alive = false;

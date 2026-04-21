@@ -6,6 +6,7 @@ export type InputState = {
   left: boolean;
   right: boolean;
   shoot: boolean;
+  reload: boolean;
   aimX: number;
   aimY: number;
   slot: number;
@@ -23,7 +24,10 @@ export type ItemType =
   | "boots_mid"
   | "boots_heavy"
   | "gun_smg_9mm"
-  | "gun_ar_762";
+  | "gun_ar_762"
+  | "gun_ak_762"
+  | "gun_sniper_762"
+  | "gun_m9_9mm";
 
 export type InventorySlot = {
   t: ItemType;
@@ -51,8 +55,10 @@ export type RoomPlayer = {
   respawnAt: number;
   cooldown: number;
   prevShoot: boolean;
+  prevReload: boolean;
   deaths: number;
-  inv: Array<InventorySlot | null>;
+  weapons: Array<InventorySlot | null>;
+  items: Array<InventorySlot | null>;
   input: InputState;
   lastInputAt: number;
   lastProcessedInputSeq: number;
@@ -69,6 +75,7 @@ export type Bullet = {
   vx: number;
   vy: number;
   ttl: number;
+  damage: number;
 };
 
 export type Explosion = {

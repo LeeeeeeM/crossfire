@@ -6,7 +6,17 @@ import { COLORS, OBSTACLES, SPAWNS } from "./data/game-data";
 import { startGameLoop } from "./services/game-loop";
 import { bearerToken, jsonResponse } from "./utils/http";
 import { handleHttpApiRoutes } from "./controllers/http-routes";
-import { clearReloadState, invAdd, invApplyAmmoPickup, invCanTakeAmmoPickup, invHasSpaceFor, invRemoveAt } from "./services/inventory-service";
+import {
+  addPickup,
+  applyAmmoPickup,
+  canTakeAmmoPickup,
+  clearReloadState,
+  hasSpaceForPickup,
+  initialItems,
+  initialWeapons,
+  removeItemAt,
+  removeWeaponAt
+} from "./services/inventory-service";
 import { clamp, collisionAt as collisionAtInWorld, hashId } from "./utils/math-utils";
 import { createRoomService } from "./services/room-service";
 import type { Bullet, Drop, Explosion, InputState, KnifeArcFx, RoomPlayer, RoomState, WsData } from "./models/server-types";
@@ -29,12 +39,10 @@ const {
   worldHeight: WORLD_HEIGHT,
   playerRadius: PLAYER_R,
   movePerFrame: MOVE_PER_FRAME,
-  bulletSpeed: BULLET_SPEED,
-  bulletTtl: BULLET_TTL,
-  damage: DAMAGE,
   maxHp: MAX_HP,
   respawnFrames: RESPAWN_FRAMES,
-  inventorySize: INVENTORY_SIZE,
+  weaponSlotSize: WEAPON_SLOT_SIZE,
+  itemSlotSize: ITEM_SLOT_SIZE,
   pickupRadius: PICKUP_RADIUS,
   maxDrops: MAX_DROPS,
   dropIntervalFrames: DROP_INTERVAL_FRAMES,
@@ -48,7 +56,6 @@ const {
   dropThrowOffset: DROP_THROW_OFFSET,
   bulletHitRadiusPadding: BULLET_HIT_RADIUS_PADDING,
   explosionFxFrames: EXPLOSION_FX_FRAMES,
-  defaultGunCooldownFrames: DEFAULT_GUN_COOLDOWN_FRAMES,
   reloadDurationFrames: RELOAD_DURATION_FRAMES,
   knifeCooldownFrames: KNIFE_COOLDOWN_FRAMES,
   knifeArcFxFrames: KNIFE_ARC_FX_FRAMES
@@ -81,6 +88,7 @@ function defaultInput(): InputState {
     left: false,
     right: false,
     shoot: false,
+    reload: false,
     aimX: 0,
     aimY: 0,
     slot: 0
@@ -94,6 +102,7 @@ function clearActionInputKeepAim(input: InputState): InputState {
     left: false,
     right: false,
     shoot: false,
+    reload: false,
     aimX: input.aimX,
     aimY: input.aimY,
     slot: input.slot
@@ -134,7 +143,8 @@ const roomService = createRoomService({
   obstacles: OBSTACLES,
   maxPlayers: MAX_PLAYERS,
   maxHp: MAX_HP,
-  inventorySize: INVENTORY_SIZE,
+  weaponSlotSize: WEAPON_SLOT_SIZE,
+  itemSlotSize: ITEM_SLOT_SIZE,
   dropIntervalFrames: DROP_INTERVAL_FRAMES,
   reloadDurationFrames: RELOAD_DURATION_FRAMES,
   explosionFxFrames: EXPLOSION_FX_FRAMES,
@@ -142,6 +152,8 @@ const roomService = createRoomService({
   defaultInput,
   spawnFor,
   clearReloadState,
+  initialWeapons,
+  initialItems,
   broadcastSnapshot,
   broadcastLobbyState,
   collisionAt
@@ -179,6 +191,10 @@ startGameLoop({
   dropSpawnAttempts: DROP_SPAWN_ATTEMPTS,
   dropRandomSaltMod: DROP_RANDOM_SALT_MOD,
   magSmg9mm: MAG_SMG_9MM,
+  magAr762: SERVER_CONSTANTS.magAr762,
+  magAk762: SERVER_CONSTANTS.magAk762,
+  magSniper762: SERVER_CONSTANTS.magSniper762,
+  magM9: SERVER_CONSTANTS.magM9,
   playerRadius: PLAYER_R,
   worldWidth: WORLD_WIDTH,
   worldHeight: WORLD_HEIGHT,
@@ -186,15 +202,11 @@ startGameLoop({
   movePerFrame: MOVE_PER_FRAME,
   maxHp: MAX_HP,
   knifeCooldownFrames: KNIFE_COOLDOWN_FRAMES,
-  bulletSpeed: BULLET_SPEED,
-  bulletTtl: BULLET_TTL,
   bulletSpawnOffset: BULLET_SPAWN_OFFSET,
   bulletHitRadiusPadding: BULLET_HIT_RADIUS_PADDING,
   explosionFxFrames: EXPLOSION_FX_FRAMES,
-  defaultGunCooldownFrames: DEFAULT_GUN_COOLDOWN_FRAMES,
-  damage: DAMAGE,
   respawnFrames: RESPAWN_FRAMES,
-  inventorySize: INVENTORY_SIZE,
+  weaponSlotSize: WEAPON_SLOT_SIZE,
   knifeArcFxFrames: KNIFE_ARC_FX_FRAMES,
   collisionAt,
   clearActionInputKeepAim,
@@ -213,7 +225,8 @@ const websocketHandlers = makeWebSocketHandlers({
   playerToRoom,
   rooms,
   maxPlayers: MAX_PLAYERS,
-  inventorySize: INVENTORY_SIZE,
+  weaponSlotSize: WEAPON_SLOT_SIZE,
+  itemSlotSize: ITEM_SLOT_SIZE,
   pickupRadius: PICKUP_RADIUS,
   reconnectGraceMs: RECONNECT_GRACE_MS,
   dropThrowOffset: DROP_THROW_OFFSET,
@@ -229,11 +242,12 @@ const websocketHandlers = makeWebSocketHandlers({
   removePlayerFromRoom,
   clamp,
   collisionAt,
-  invCanTakeAmmoPickup,
-  invHasSpaceFor,
-  invApplyAmmoPickup,
-  invAdd,
-  invRemoveAt
+  canTakeAmmoPickup,
+  hasSpaceForPickup,
+  applyAmmoPickup,
+  addPickup,
+  removeWeaponAt,
+  removeItemAt
 });
 
 const server = Bun.serve<WsData>({

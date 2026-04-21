@@ -22,7 +22,7 @@ import {
   DEFAULT_TICK_MS,
   DEFAULT_WORLD_HEIGHT,
   DEFAULT_WORLD_WIDTH,
-  INVENTORY_SIZE,
+  ITEM_SLOT_SIZE,
   MAX_HP,
   MAX_PENDING_INPUTS,
   MOVE_PER_FRAME,
@@ -30,6 +30,7 @@ import {
   VIEW_ASPECT,
   VIEW_H,
   VIEW_W,
+  WEAPON_SLOT_SIZE,
   clamp,
   collisionAt,
   drawKnifeArcFx,
@@ -62,10 +63,13 @@ export default function LockstepArenaPage() {
     left: false,
     right: false,
     shoot: false,
+    reload: false,
     aimX: 0,
     aimY: 0,
     slot: 0
   });
+  // 存储鼠标在视口上的位置(0-1范围)，用于在玩家移动时重新计算aimX/aimY
+  const mouseViewportRef = useRef<{ x: number; y: number }>({ x: 0.5, y: 0.5 });
   const playersRef = useRef<Map<string, Player>>(new Map());
   const bulletsRef = useRef<Bullet[]>([]);
   const explosionsRef = useRef<Explosion[]>([]);
@@ -109,12 +113,14 @@ export default function LockstepArenaPage() {
   const [roomList, setRoomList] = useState<RoomMeta[]>([]);
   const [roomMeta, setRoomMeta] = useState<RoomMeta | null>(null);
   const [countdown, setCountdown] = useState<number>(0);
-  const [selectedInvIdx, setSelectedInvIdx] = useState<number>(0);
-  const selectedInvIdxRef = useRef(0);
+  const [selectedWeaponIdx, setSelectedWeaponIdx] = useState<number>(0);
+  const selectedWeaponIdxRef = useRef(0);
+  const [selectedItemIdx, setSelectedItemIdx] = useState<number>(0);
+  const [activeSection, setActiveSection] = useState<"weapon" | "item">("weapon");
   useEffect(() => {
-    selectedInvIdxRef.current = selectedInvIdx;
-    inputRef.current.slot = selectedInvIdx;
-  }, [selectedInvIdx]);
+    selectedWeaponIdxRef.current = selectedWeaponIdx;
+    inputRef.current.slot = selectedWeaponIdx;
+  }, [selectedWeaponIdx]);
 
   const lastNoAmmoHintAtRef = useRef(0);
 
@@ -138,14 +144,16 @@ export default function LockstepArenaPage() {
     pendingInputsRef.current = [];
     inputSeqRef.current = 0;
     aimInitializedRef.current = false;
-    inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, aimX: 0, aimY: 0, slot: 0 };
+    inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, reload: false, aimX: 0, aimY: 0, slot: 0 };
     setPlayerCount(0);
     setQueueLen(0);
     setLatencyMs(0);
     setServerFrame(0);
     setLocalFrame(0);
     setInvTick((t) => t + 1);
-    setSelectedInvIdx(0);
+    setSelectedWeaponIdx(0);
+    setSelectedItemIdx(0);
+    setActiveSection("weapon");
   };
 
   const inRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
@@ -178,8 +186,21 @@ export default function LockstepArenaPage() {
     const liveWs = wsRef.current;
     if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
 
+    // 根据当前相机位置和鼠标视口位置重新计算 aimX/aimY
+    const self = playersRef.current.get(selfIdRef.current);
+    const predSelf = predictedSelfRef.current;
+    const world = worldRef.current;
+    const view = viewportRef.current;
+    const centerX = predSelf && self ? predSelf.x : self ? self.x : 0;
+    const centerY = predSelf && self ? predSelf.y : self ? self.y : 0;
+    const camX = self ? clamp(centerX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
+    const camY = self ? clamp(centerY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
+    const mouseVp = mouseViewportRef.current;
+    inputRef.current.aimX = camX + mouseVp.x * view.w;
+    inputRef.current.aimY = camY + mouseVp.y * view.h;
+
     const seq = ++inputSeqRef.current;
-    const input: NetInput = { ...inputRef.current, slot: selectedInvIdxRef.current };
+    const input: NetInput = { ...inputRef.current, slot: selectedWeaponIdxRef.current };
     pendingInputsRef.current.push({ seq, input });
     if (pendingInputsRef.current.length > MAX_PENDING_INPUTS) {
       pendingInputsRef.current.splice(0, pendingInputsRef.current.length - MAX_PENDING_INPUTS);
@@ -194,16 +215,16 @@ export default function LockstepArenaPage() {
     const now = Date.now();
     if (now - lastNoAmmoHintAtRef.current < 1800) return;
     const me = playersRef.current.get(selfIdRef.current);
-    if (!me?.inv) return;
-    const slot = me.inv[selectedInvIdxRef.current];
+    if (!me?.weapons) return;
+    const slot = me.weapons[selectedWeaponIdxRef.current];
     const t = slot?.t;
-    if (t !== "gun_smg_9mm" && t !== "gun_ar_762") return;
+    if (!t || !t.startsWith("gun_")) return;
     const rounds = slot?.q ?? 0;
     if (rounds > 0) return;
     lastNoAmmoHintAtRef.current = now;
     announce({
       title: "无法开火",
-      subtitle: t === "gun_smg_9mm" ? "SMG 弹匣已空，拾取弹药补充至枪内或弹药格" : "步枪弹匣已空，拾取 7.62 弹药",
+      subtitle: "弹匣已空，按 R 换弹或拾取对应弹药",
       tone: "bad",
       durationMs: 2200
     });
@@ -316,6 +337,16 @@ export default function LockstepArenaPage() {
           prevShoot: !!p.prevShoot,
           deaths: Number(p.deaths || 0),
           lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0),
+          weapons: Array.isArray(p.weapons)
+            ? (p.weapons as Array<{ t?: string; q?: number } | null>).map((slot) =>
+                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
+              )
+            : undefined,
+          items: Array.isArray(p.items)
+            ? (p.items as Array<{ t?: string; q?: number } | null>).map((slot) =>
+                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
+              )
+            : undefined,
           inv: Array.isArray(p.inv)
             ? (p.inv as Array<{ t?: string; q?: number } | null>).map((slot) =>
                 slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
@@ -526,12 +557,35 @@ export default function LockstepArenaPage() {
       if (!showGame) return;
       if (e.repeat) return;
       const digit = e.key;
-      if (digit >= "1" && digit <= String(INVENTORY_SIZE) && digit.length === 1) {
-        setSelectedInvIdx(Number(digit) - 1);
+      if (digit >= "1" && digit <= "3" && digit.length === 1) {
+        setSelectedWeaponIdx(Number(digit) - 1);
+        setActiveSection("weapon");
+        e.preventDefault();
+        return;
+      }
+      if (digit >= "4" && digit <= "8" && digit.length === 1) {
+        setSelectedItemIdx(Number(digit) - 4);
+        setActiveSection("item");
         e.preventDefault();
         return;
       }
       const key = e.key.toLowerCase();
+      if (key === "q") {
+        setSelectedWeaponIdx((x) => (x + 1) % WEAPON_SLOT_SIZE);
+        setActiveSection("weapon");
+        e.preventDefault();
+        return;
+      }
+      if (key === "r") {
+        inputRef.current.reload = true;
+        queueAndSendInput();
+        // 保持一个发送周期内的脉冲，避免同帧 true/false 被服务端最后一条覆盖
+        window.setTimeout(() => {
+          inputRef.current.reload = false;
+        }, 0);
+        e.preventDefault();
+        return;
+      }
       if (key === "e") {
         const d = nearestDrop();
         if (!d) return;
@@ -539,18 +593,22 @@ export default function LockstepArenaPage() {
       }
       if (key === "g") {
         const me = playersRef.current.get(selfIdRef.current);
-        const slot = me?.inv?.[selectedInvIdx];
+        const slot = activeSection === "weapon" ? me?.weapons?.[selectedWeaponIdx] : me?.items?.[selectedItemIdx];
         if (!slot) return;
         if (slot.t === "knife") {
           announce({ title: "无法丢弃", subtitle: "匕首为默认物品", tone: "bad", durationMs: 1200 });
           return;
         }
-        sendWs({ type: WS_CLIENT_MSG.dropItem, slotIdx: selectedInvIdx });
+        sendWs({
+          type: WS_CLIENT_MSG.dropItem,
+          section: activeSection,
+          slotIdx: activeSection === "weapon" ? selectedWeaponIdx : selectedItemIdx
+        });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [announce, nearestDrop, selectedInvIdx, showGame]);
+  }, [activeSection, announce, nearestDrop, selectedItemIdx, selectedWeaponIdx, showGame, queueAndSendInput]);
 
   useEffect(() => {
     const updateControl = () => {
@@ -840,19 +898,9 @@ export default function LockstepArenaPage() {
     const view = viewportRef.current;
     const scaleX = view.w / Math.max(rect.width, 1);
     const scaleY = view.h / Math.max(rect.height, 1);
-    const sx = (e.clientX - rect.left) * scaleX;
-    const sy = (e.clientY - rect.top) * scaleY;
-
-    const self = playersRef.current.get(selfIdRef.current);
-    const predSelf = predictedSelfRef.current;
-    const world = worldRef.current;
-    const centerX = predSelf && self ? predSelf.x : self ? self.x : 0;
-    const centerY = predSelf && self ? predSelf.y : self ? self.y : 0;
-    const camX = self ? clamp(centerX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
-    const camY = self ? clamp(centerY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
-
-    inputRef.current.aimX = sx + camX;
-    inputRef.current.aimY = sy + camY;
+    // 存储鼠标在视口上的相对位置(0-1范围)
+    mouseViewportRef.current.x = Math.max(0, Math.min(1, ((e.clientX - rect.left) * scaleX) / view.w));
+    mouseViewportRef.current.y = Math.max(0, Math.min(1, ((e.clientY - rect.top) * scaleY) / view.h));
   };
 
   const createRoom = () => {
@@ -903,11 +951,19 @@ export default function LockstepArenaPage() {
       }));
   }, [playerCount, localFrame]);
 
-  const invSlots = useMemo(() => {
+  const weaponSlots = useMemo(() => {
     const me = playersRef.current.get(selfIdRef.current);
-    const inv = me?.inv || [];
+    const inv = me?.weapons || [];
     const out: Array<{ t: string; q: number } | null> = [];
-    for (let i = 0; i < INVENTORY_SIZE; i += 1) out.push(inv[i] || null);
+    for (let i = 0; i < WEAPON_SLOT_SIZE; i += 1) out.push(inv[i] || null);
+    return out;
+  }, [playerCount, localFrame, invTick]);
+
+  const itemSlots = useMemo(() => {
+    const me = playersRef.current.get(selfIdRef.current);
+    const inv = me?.items || [];
+    const out: Array<{ t: string; q: number } | null> = [];
+    for (let i = 0; i < ITEM_SLOT_SIZE; i += 1) out.push(inv[i] || null);
     return out;
   }, [playerCount, localFrame, invTick]);
 
@@ -1093,29 +1149,58 @@ export default function LockstepArenaPage() {
 
               <div className="inventory-panel" aria-label="物品栏">
                 <div className="inventory-head">
-                  <h3>物品栏</h3>
+                  <h3>背包</h3>
                   <div className="inventory-hints muted" aria-label="物品栏操作说明">
                     <span>E 拾取</span>
-                    <span>1–8 选格</span>
+                    <span>1–3 武器</span>
+                    <span>4–8 物品</span>
+                    <span>Q 切枪</span>
+                    <span>R 换弹</span>
                     <span>G 丢弃</span>
                     <span>空格 / 鼠标攻击</span>
                     <span>枪械数字为剩余弹量</span>
                   </div>
                 </div>
+                <div className="muted">武器栏</div>
                 <div className="inv-grid">
-                  {invSlots.map((s, idx) => {
-                    const active = idx === selectedInvIdx;
+                  {weaponSlots.map((s, idx) => {
+                    const active = activeSection === "weapon" && idx === selectedWeaponIdx;
                     const cls = active ? "inv-slot active" : "inv-slot";
                     return (
                       <button
                         key={idx}
                         type="button"
                         className={cls}
-                        onClick={() => setSelectedInvIdx(idx)}
+                        onClick={() => {
+                          setSelectedWeaponIdx(idx);
+                          setActiveSection("weapon");
+                        }}
                         aria-pressed={active}
                       >
                         <div className="inv-name">{s ? itemLabel(s.t) : "空"}</div>
                         {s && s.q > 1 ? <div className="inv-qty">x{s.q}</div> : <div className="inv-qty muted">{idx + 1}</div>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="muted" style={{ marginTop: 8 }}>物品栏</div>
+                <div className="inv-grid">
+                  {itemSlots.map((s, idx) => {
+                    const active = activeSection === "item" && idx === selectedItemIdx;
+                    const cls = active ? "inv-slot active" : "inv-slot";
+                    return (
+                      <button
+                        key={`item_${idx}`}
+                        type="button"
+                        className={cls}
+                        onClick={() => {
+                          setSelectedItemIdx(idx);
+                          setActiveSection("item");
+                        }}
+                        aria-pressed={active}
+                      >
+                        <div className="inv-name">{s ? itemLabel(s.t) : "空"}</div>
+                        {s && s.q > 1 ? <div className="inv-qty">x{s.q}</div> : <div className="inv-qty muted">{idx + 4}</div>}
                       </button>
                     );
                   })}
