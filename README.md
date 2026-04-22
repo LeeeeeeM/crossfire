@@ -86,11 +86,6 @@ VITE_BACKEND_WS_TARGET=ws://127.0.0.1:8787
 
 ## 路由
 
-- `/doom` DOOM lockstep 可视化
-- `/quake` Quake 预测+纠正可视化
-- `/cnc` C&C 工程化 lockstep 可视化
-- `/source` Source 快照增量同步可视化
-- `/freefire` Free Fire 混合同步可视化
 - `/auth` 注册/登录页（PG 账号）
 - `/lobby` WebSocket 帧同步对战页（登录账号即玩家身份）
 
