@@ -67,7 +67,6 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
       lastProcessedInputSeq: p.lastProcessedInputSeq,
       weapons: p.weapons,
       items: p.items,
-      inv: [...p.weapons, ...p.items],
       reloadEndFrame: p.reloadEndFrame || 0,
       reloadStartFrame: p.reloadStartFrame || 0,
       reloadSlotIdx: p.reloadSlotIdx ?? -1
@@ -75,26 +74,32 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
   }
 
   function statePayload(room: RoomState, type: (typeof WS_STATE_TYPE)[keyof typeof WS_STATE_TYPE], reason?: string) {
-    return {
+    const payload = {
       type,
       reason,
       frame: room.frame,
       serverTime: Date.now(),
       room: roomMeta(room),
-      world: {
-        width: ctx.worldWidth,
-        height: ctx.worldHeight,
-        obstacles: ctx.obstacles,
-        reloadDurationFrames: ctx.reloadDurationFrames,
-        explosionFxFrames: ctx.explosionFxFrames,
-        bulletSpawnOffset: ctx.bulletSpawnOffset
-      },
       players: playersPayload(room),
       bullets: room.bullets,
       explosions: room.explosions,
       knifeArcs: room.knifeArcs,
       drops: room.drops
     };
+    if (type === WS_STATE_TYPE.snapshot) {
+      return {
+        ...payload,
+        world: {
+          width: ctx.worldWidth,
+          height: ctx.worldHeight,
+          obstacles: ctx.obstacles,
+          reloadDurationFrames: ctx.reloadDurationFrames,
+          explosionFxFrames: ctx.explosionFxFrames,
+          bulletSpawnOffset: ctx.bulletSpawnOffset
+        }
+      };
+    }
+    return payload;
   }
 
   function pickAvailableColor(room: RoomState) {
@@ -134,10 +139,9 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
 
   function createRoom(ownerKey: string) {
     let id = "";
-    for (let i = 0; i < 10; i += 1) {
+    do {
       id = Math.random().toString(36).slice(2, 8).toUpperCase();
-      if (!ctx.rooms.has(id)) break;
-    }
+    } while (ctx.rooms.has(id));
     const room: RoomState = {
       id,
       ownerKey,

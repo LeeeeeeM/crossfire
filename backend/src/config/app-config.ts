@@ -53,5 +53,5 @@ export const GAME_CONFIG = {
   knifeArcHalfRad: Math.PI / 3,
   knifeMeleeRange: numEnv("KNIFE_MELEE_RANGE", 52),
   knifeCooldownFrames: numEnv("KNIFE_COOLDOWN_FRAMES", 12),
-  knifeArcFxFrames: numEnv("KNIFE_ARC_FX_FRAMES", 18)
+  knifeArcFxFrames: numEnv("KNIFE_ARC_FX_FRAMES", 11)
 };

@@ -49,6 +49,12 @@ import {
   type World
 } from "./arena/shared";
 
+function sameRoomMeta(a: RoomMeta | null, b: RoomMeta | null) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.id === b.id && a.ownerKey === b.ownerKey && a.status === b.status && a.playerCount === b.playerCount && a.maxPlayers === b.maxPlayers;
+}
+
 export default function LockstepArenaPage() {
   const navigate = useNavigate();
   const { announce, registerAnnounceAnchor } = useSystemAnnouncer();
@@ -94,6 +100,8 @@ export default function LockstepArenaPage() {
   const pendingInputsRef = useRef<Array<{ seq: number; input: NetInput }>>([]);
   const aimInitializedRef = useRef(false);
   const roomMetaRef = useRef<RoomMeta | null>(null);
+  const selfInvSigRef = useRef("");
+  const lastLatencyUpdateAtRef = useRef(0);
 
   /** 递增以在「同一帧人数不变」时仍能刷新背包 UI（playersRef 变了但 playerCount 可能不变） */
   const [invTick, setInvTick] = useState(0);
@@ -144,6 +152,8 @@ export default function LockstepArenaPage() {
     pendingInputsRef.current = [];
     inputSeqRef.current = 0;
     aimInitializedRef.current = false;
+    selfInvSigRef.current = "";
+    lastLatencyUpdateAtRef.current = 0;
     inputRef.current = { up: false, down: false, left: false, right: false, shoot: false, reload: false, aimX: 0, aimY: 0, slot: 0 };
     setPlayerCount(0);
     setQueueLen(0);
@@ -297,8 +307,10 @@ export default function LockstepArenaPage() {
       setRoomList(rooms);
 
       const nextRoom = parseRoom(msg);
-      roomMetaRef.current = nextRoom;
-      setRoomMeta(nextRoom);
+      if (!sameRoomMeta(roomMetaRef.current, nextRoom)) {
+        roomMetaRef.current = nextRoom;
+        setRoomMeta(nextRoom);
+      }
 
       return { rooms, nextRoom };
     };
@@ -306,8 +318,10 @@ export default function LockstepArenaPage() {
     const applyState = (msg: WsStateMessage) => {
 
       const nextRoom = parseRoom(msg);
-      roomMetaRef.current = nextRoom;
-      setRoomMeta(nextRoom);
+      if (!sameRoomMeta(roomMetaRef.current, nextRoom)) {
+        roomMetaRef.current = nextRoom;
+        setRoomMeta(nextRoom);
+      }
 
       if (msg.world && Array.isArray(msg.world.obstacles)) {
         const w = msg.world as World;
@@ -347,11 +361,6 @@ export default function LockstepArenaPage() {
                 slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
               )
             : undefined,
-          inv: Array.isArray(p.inv)
-            ? (p.inv as Array<{ t?: string; q?: number } | null>).map((slot) =>
-                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
-              )
-            : undefined,
           reloadEndFrame: Number(p.reloadEndFrame || 0),
           reloadStartFrame: Number(p.reloadStartFrame || 0),
           reloadSlotIdx: Number(p.reloadSlotIdx ?? -1)
@@ -376,11 +385,20 @@ export default function LockstepArenaPage() {
       setLocalFrame(f);
       setServerFrame(f);
       setPlayerCount(next.size);
-      setLatencyMs(Math.max(0, Date.now() - Number(msg.serverTime || Date.now())));
-      setInvTick((t) => t + 1);
+      const nowMs = Date.now();
+      const latency = Math.max(0, nowMs - Number(msg.serverTime || nowMs));
+      if (nowMs - lastLatencyUpdateAtRef.current >= 200) {
+        setLatencyMs(latency);
+        lastLatencyUpdateAtRef.current = nowMs;
+      }
 
       const self = next.get(selfIdRef.current);
       if (self) {
+        const invSig = JSON.stringify(self.weapons || []) + "|" + JSON.stringify(self.items || []);
+        if (invSig !== selfInvSigRef.current) {
+          selfInvSigRef.current = invSig;
+          setInvTick((t) => t + 1);
+        }
         if (!aimInitializedRef.current) {
           inputRef.current.aimX = self.x + Math.cos(self.dir) * 120;
           inputRef.current.aimY = self.y + Math.sin(self.dir) * 120;
@@ -413,6 +431,7 @@ export default function LockstepArenaPage() {
         pendingInputsRef.current = [];
         predictedSelfRef.current = null;
         aimInitializedRef.current = false;
+        selfInvSigRef.current = "";
         setQueueLen(0);
       }
 
@@ -437,6 +456,8 @@ export default function LockstepArenaPage() {
       inputSeqRef.current = 0;
       pendingInputsRef.current = [];
       predictedSelfRef.current = null;
+      selfInvSigRef.current = "";
+      lastLatencyUpdateAtRef.current = 0;
       setQueueLen(0);
     };
 
@@ -528,12 +549,21 @@ export default function LockstepArenaPage() {
   }, [countdown]);
 
   useEffect(() => {
-    const iv = setInterval(() => {
-      if (!canControlRef.current) return;
-      queueAndSendInput();
-    }, DEFAULT_TICK_MS);
-    return () => clearInterval(iv);
-  }, [countdown, showGame, queueAndSendInput]);
+    let timer = 0;
+    let cancelled = false;
+    const loop = () => {
+      if (cancelled) return;
+      if (canControlRef.current) queueAndSendInput();
+      const delay = Math.max(8, Number(tickMsRef.current || DEFAULT_TICK_MS));
+      timer = window.setTimeout(loop, delay);
+    };
+    const delay = Math.max(8, Number(tickMsRef.current || DEFAULT_TICK_MS));
+    timer = window.setTimeout(loop, delay);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [queueAndSendInput]);
 
   const nearestDrop = useMemo(() => {
     return () => {

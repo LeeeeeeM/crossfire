@@ -26,7 +26,6 @@ export type Player = {
   lastProcessedInputSeq: number;
   weapons?: Array<{ t: string; q: number } | null>;
   items?: Array<{ t: string; q: number } | null>;
-  inv?: Array<{ t: string; q: number } | null>;
   reloadEndFrame?: number;
   reloadStartFrame?: number;
   reloadSlotIdx?: number;
@@ -98,7 +97,7 @@ export const INVENTORY_SIZE = WEAPON_SLOT_SIZE + ITEM_SLOT_SIZE;
 export const MAX_PENDING_INPUTS = 200;
 export const KNIFE_ARC_HALF_RAD = Math.PI / 3;
 export const KNIFE_MELEE_RANGE = 52;
-export const KNIFE_ARC_FX_FRAMES = 18;
+export const KNIFE_ARC_FX_FRAMES = 11;
 export const DEFAULT_EXPLOSION_FX_FRAMES = 15;
 export const DEFAULT_BULLET_SPAWN_OFFSET = 20;
 export const DEFAULT_RELOAD_DURATION_FRAMES = 45;
@@ -200,39 +199,57 @@ export function drawKnifeArcFx(ctx: CanvasRenderingContext2D, arc: KnifeArcFx, f
   const age = frame - arc.born;
   if (age < 0 || age > KNIFE_ARC_FX_FRAMES) return;
   const t = clamp(age / KNIFE_ARC_FX_FRAMES, 0, 1);
-  const fade = 1 - t;
+  const fade = Math.pow(1 - t, 0.95);
   const { x: cx, y: cy, dir } = arc;
   const a0 = dir - KNIFE_ARC_HALF_RAD;
   const a1 = dir + KNIFE_ARC_HALF_RAD;
   const r = KNIFE_MELEE_RANGE;
+  const sweep = a1 - a0;
+  const sweepT = clamp(age / 3, 0, 1);
+  const headAngle = a0 + sweep * clamp(0.08 + sweepT * 1.08, 0, 1);
+  const tailSpan = sweep * (0.22 + (1 - t) * 0.46);
+  const tailStart = Math.max(a0, headAngle - tailSpan);
+  const segments = 22;
 
   ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.arc(cx, cy, r, a0, a1, false);
-  ctx.closePath();
-  const fillAlpha = 0.42 * fade;
-  const grad = ctx.createRadialGradient(cx, cy, PLAYER_R * 0.4, cx, cy, r);
-  grad.addColorStop(0, `rgba(255, 252, 235, ${fillAlpha * 0.35})`);
-  grad.addColorStop(0.45, `rgba(255, 185, 95, ${fillAlpha * 0.72})`);
-  grad.addColorStop(1, `rgba(255, 95, 45, ${fillAlpha * 0.22})`);
-  ctx.fillStyle = grad;
-  ctx.fill();
+  ctx.lineCap = "butt";
+  for (let i = 0; i < segments; i += 1) {
+    const seg0 = i / segments;
+    const seg1 = (i + 1) / segments;
+    const ang0 = tailStart + (headAngle - tailStart) * seg0;
+    const ang1 = tailStart + (headAngle - tailStart) * seg1;
+    const k = (seg0 + seg1) * 0.5;
+    const kPow = Math.pow(k, 1.55);
+    const alpha = fade * (0.06 + 0.9 * kPow);
+    const lineW = 1.7 + 2.5 * Math.pow(k, 1.05);
+    const rr = r * (0.95 + 0.08 * k);
+    const g = Math.round(72 + 180 * kPow);
+    const b = Math.round(44 + 170 * kPow);
 
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, a0, a1, false);
-  ctx.strokeStyle = `rgba(255, 238, 210, ${0.82 * fade})`;
-  ctx.lineWidth = 3.5;
-  ctx.lineCap = "round";
-  ctx.shadowColor = "rgba(255, 210, 140, 0.85)";
-  ctx.shadowBlur = 12;
-  ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, ang0, ang1, false);
+    ctx.strokeStyle = `rgba(255, ${g}, ${b}, ${alpha})`;
+    ctx.lineWidth = lineW;
+    if (k > 0.8) {
+      ctx.shadowColor = `rgba(255, 238, 210, ${alpha})`;
+      ctx.shadowBlur = 10 + 8 * k;
+    } else {
+      ctx.shadowBlur = 0;
+    }
+    ctx.stroke();
+  }
   ctx.shadowBlur = 0;
 
+  const hx = cx + Math.cos(headAngle) * r * 1.02;
+  const hy = cy + Math.sin(headAngle) * r * 1.02;
+  const core = 2.2 + 1.5 * fade;
+  const coreGrad = ctx.createRadialGradient(hx, hy, core * 0.35, hx, hy, core * 2.1);
+  coreGrad.addColorStop(0, `rgba(255, 255, 245, ${0.95 * fade})`);
+  coreGrad.addColorStop(0.42, `rgba(255, 228, 170, ${0.7 * fade})`);
+  coreGrad.addColorStop(1, "rgba(255, 132, 54, 0)");
   ctx.beginPath();
-  ctx.arc(cx, cy, r * 0.86, a0 + 0.05, a1 - 0.05, false);
-  ctx.strokeStyle = `rgba(255, 255, 255, ${0.45 * fade})`;
-  ctx.lineWidth = 1.3;
-  ctx.stroke();
+  ctx.arc(hx, hy, core * 2.1, 0, Math.PI * 2);
+  ctx.fillStyle = coreGrad;
+  ctx.fill();
   ctx.restore();
 }

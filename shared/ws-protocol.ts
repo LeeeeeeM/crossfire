@@ -116,7 +116,7 @@ export type WsStateMessage = {
   frame: number;
   serverTime: number;
   room: WsRoomMetaPayload;
-  world: WsWorldPayload;
+  world?: WsWorldPayload;
   players: WsPlayerPayload[];
   bullets: WsBulletPayload[];
   explosions: WsExplosionPayload[];

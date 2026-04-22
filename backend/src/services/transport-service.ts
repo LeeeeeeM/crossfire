@@ -43,9 +43,13 @@ export function createTransportService(ctx: CreateTransportServiceContext) {
   }
 
   function broadcastLobbyState() {
+    const rooms = ctx.listRooms();
     for (const ws of ctx.clients.values()) {
       if (!ws.data.authed) continue;
-      sendLobbyState(ws.data.connId, ws.data.playerKey);
+      const playerKey = ws.data.playerKey || "";
+      const roomId = playerKey ? ctx.playerToRoom.get(playerKey) || "" : "";
+      const room = roomId ? ctx.rooms.get(roomId) : null;
+      sendTo(ws.data.connId, { type: WS_SERVER_MSG.lobbyState, room: room ? ctx.roomMeta(room) : null, rooms });
     }
   }
 
