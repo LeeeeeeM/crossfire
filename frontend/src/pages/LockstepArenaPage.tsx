@@ -59,6 +59,9 @@ function sameRoomMeta(a: RoomMeta | null, b: RoomMeta | null) {
   return a.id === b.id && a.ownerKey === b.ownerKey && a.status === b.status && a.playerCount === b.playerCount && a.maxPlayers === b.maxPlayers;
 }
 
+const INPUT_MAX_SEND_HZ = 15;
+const INPUT_MIN_SEND_INTERVAL_MS = Math.round(1000 / INPUT_MAX_SEND_HZ);
+
 export default function LockstepArenaPage() {
   const navigate = useNavigate();
   const { announce, registerAnnounceAnchor } = useSystemAnnouncer();
@@ -102,6 +105,11 @@ export default function LockstepArenaPage() {
   const predictedSelfRef = useRef<{ x: number; y: number; dir: number; lastTs: number } | null>(null);
   const inputSeqRef = useRef(0);
   const pendingInputsRef = useRef<Array<{ seq: number; input: NetInput }>>([]);
+  const lastSentInputSigRef = useRef("");
+  const lastSentInputAtRef = useRef(0);
+  const pendingInputRef = useRef<NetInput | null>(null);
+  const pendingInputSigRef = useRef("");
+  const pendingInputTimerRef = useRef(0);
   const aimInitializedRef = useRef(false);
   const roomMetaRef = useRef<RoomMeta | null>(null);
   const selfInvSigRef = useRef("");
@@ -155,6 +163,14 @@ export default function LockstepArenaPage() {
     predictedSelfRef.current = null;
     pendingInputsRef.current = [];
     inputSeqRef.current = 0;
+    lastSentInputSigRef.current = "";
+    lastSentInputAtRef.current = 0;
+    pendingInputRef.current = null;
+    pendingInputSigRef.current = "";
+    if (pendingInputTimerRef.current) {
+      window.clearTimeout(pendingInputTimerRef.current);
+      pendingInputTimerRef.current = 0;
+    }
     aimInitializedRef.current = false;
     selfInvSigRef.current = "";
     lastLatencyUpdateAtRef.current = 0;
@@ -193,36 +209,90 @@ export default function LockstepArenaPage() {
     return true;
   };
 
-  const queueAndSendInput = useCallback(() => {
-    if (!showGame || countdown > 0) return;
-    if (!selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
+  const queueAndSendInput = useCallback(
+    (immediate = false) => {
+      if (!showGame || countdown > 0) return;
+      if (!selfIdRef.current || !playersRef.current.has(selfIdRef.current)) return;
 
-    const liveWs = wsRef.current;
-    if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
+      const liveWs = wsRef.current;
+      if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
 
-    // 根据当前相机位置和鼠标视口位置重新计算 aimX/aimY
-    const self = playersRef.current.get(selfIdRef.current);
-    const predSelf = predictedSelfRef.current;
-    const world = worldRef.current;
-    const view = viewportRef.current;
-    const centerX = predSelf && self ? predSelf.x : self ? self.x : 0;
-    const centerY = predSelf && self ? predSelf.y : self ? self.y : 0;
-    const camX = self ? clamp(centerX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
-    const camY = self ? clamp(centerY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
-    const mouseVp = mouseViewportRef.current;
-    inputRef.current.aimX = camX + mouseVp.x * view.w;
-    inputRef.current.aimY = camY + mouseVp.y * view.h;
+      // 根据当前相机位置和鼠标视口位置重新计算 aimX/aimY
+      const self = playersRef.current.get(selfIdRef.current);
+      const predSelf = predictedSelfRef.current;
+      const world = worldRef.current;
+      const view = viewportRef.current;
+      const centerX = predSelf && self ? predSelf.x : self ? self.x : 0;
+      const centerY = predSelf && self ? predSelf.y : self ? self.y : 0;
+      const camX = self ? clamp(centerX - view.w / 2, 0, Math.max(0, world.width - view.w)) : 0;
+      const camY = self ? clamp(centerY - view.h / 2, 0, Math.max(0, world.height - view.h)) : 0;
+      const mouseVp = mouseViewportRef.current;
+      inputRef.current.aimX = camX + mouseVp.x * view.w;
+      inputRef.current.aimY = camY + mouseVp.y * view.h;
 
-    const seq = ++inputSeqRef.current;
-    const input: NetInput = { ...inputRef.current, slot: selectedWeaponIdxRef.current };
-    pendingInputsRef.current.push({ seq, input });
-    if (pendingInputsRef.current.length > MAX_PENDING_INPUTS) {
-      pendingInputsRef.current.splice(0, pendingInputsRef.current.length - MAX_PENDING_INPUTS);
-    }
-    setQueueLen(pendingInputsRef.current.length);
-    const payload: WsClientInputMessage = { type: WS_CLIENT_MSG.input, seq, ...input };
-    liveWs.send(JSON.stringify(payload));
-  }, [showGame, countdown]);
+      const input: NetInput = { ...inputRef.current, slot: selectedWeaponIdxRef.current };
+      const sig = JSON.stringify(input);
+      const now = performance.now();
+      const elapsed = now - lastSentInputAtRef.current;
+
+      const flush = (next: NetInput, nextSig: string) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const seq = ++inputSeqRef.current;
+        pendingInputsRef.current.push({ seq, input: next });
+        if (pendingInputsRef.current.length > MAX_PENDING_INPUTS) {
+          pendingInputsRef.current.splice(0, pendingInputsRef.current.length - MAX_PENDING_INPUTS);
+        }
+        setQueueLen(pendingInputsRef.current.length);
+        const payload: WsClientInputMessage = { type: WS_CLIENT_MSG.input, seq, ...next };
+        ws.send(JSON.stringify(payload));
+        lastSentInputAtRef.current = performance.now();
+        lastSentInputSigRef.current = nextSig;
+      };
+
+      const schedulePending = (delayMs: number) => {
+        if (pendingInputTimerRef.current) window.clearTimeout(pendingInputTimerRef.current);
+        pendingInputTimerRef.current = window.setTimeout(() => {
+          pendingInputTimerRef.current = 0;
+          const queued = pendingInputRef.current;
+          const queuedSig = pendingInputSigRef.current;
+          if (!queued || !queuedSig) return;
+          const ws = wsRef.current;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const waited = performance.now() - lastSentInputAtRef.current;
+          if (waited < INPUT_MIN_SEND_INTERVAL_MS) {
+            schedulePending(INPUT_MIN_SEND_INTERVAL_MS - waited);
+            return;
+          }
+          pendingInputRef.current = null;
+          pendingInputSigRef.current = "";
+          flush(queued, queuedSig);
+        }, Math.max(0, delayMs));
+      };
+
+      if (sig === lastSentInputSigRef.current) return;
+      if (elapsed >= INPUT_MIN_SEND_INTERVAL_MS && immediate) {
+        pendingInputRef.current = null;
+        pendingInputSigRef.current = "";
+        if (pendingInputTimerRef.current) {
+          window.clearTimeout(pendingInputTimerRef.current);
+          pendingInputTimerRef.current = 0;
+        }
+        flush(input, sig);
+        return;
+      }
+
+      if (elapsed >= INPUT_MIN_SEND_INTERVAL_MS && !immediate) {
+        flush(input, sig);
+        return;
+      }
+
+      pendingInputRef.current = input;
+      pendingInputSigRef.current = sig;
+      schedulePending(INPUT_MIN_SEND_INTERVAL_MS - elapsed);
+    },
+    [showGame, countdown]
+  );
 
   /** 枪械使用格内备弹数；弹尽时提示（节流） */
   const warnIfGunDryFire = useCallback(() => {
@@ -459,6 +529,14 @@ export default function LockstepArenaPage() {
       tickMsRef.current = DEFAULT_TICK_MS;
       inputSeqRef.current = 0;
       pendingInputsRef.current = [];
+      lastSentInputSigRef.current = "";
+      lastSentInputAtRef.current = 0;
+      pendingInputRef.current = null;
+      pendingInputSigRef.current = "";
+      if (pendingInputTimerRef.current) {
+        window.clearTimeout(pendingInputTimerRef.current);
+        pendingInputTimerRef.current = 0;
+      }
       predictedSelfRef.current = null;
       selfInvSigRef.current = "";
       lastLatencyUpdateAtRef.current = 0;
@@ -569,6 +647,15 @@ export default function LockstepArenaPage() {
     };
   }, [queueAndSendInput]);
 
+  useEffect(() => {
+    return () => {
+      if (pendingInputTimerRef.current) {
+        window.clearTimeout(pendingInputTimerRef.current);
+        pendingInputTimerRef.current = 0;
+      }
+    };
+  }, []);
+
   const nearestDrop = useMemo(() => {
     return () => {
       const me = playersRef.current.get(selfIdRef.current);
@@ -612,10 +699,11 @@ export default function LockstepArenaPage() {
       }
       if (key === "r") {
         inputRef.current.reload = true;
-        queueAndSendInput();
+        queueAndSendInput(true);
         // 保持一个发送周期内的脉冲，避免同帧 true/false 被服务端最后一条覆盖
         window.setTimeout(() => {
           inputRef.current.reload = false;
+          queueAndSendInput();
         }, 0);
         e.preventDefault();
         return;
@@ -656,7 +744,7 @@ export default function LockstepArenaPage() {
         inputRef.current.left = false;
         inputRef.current.right = false;
         inputRef.current.shoot = false;
-        if (showGame) queueAndSendInput();
+        if (showGame) queueAndSendInput(true);
       }
     };
 
@@ -892,13 +980,25 @@ export default function LockstepArenaPage() {
         e.preventDefault();
         inputRef.current.shoot = true;
         warnIfGunDryFire();
-        queueAndSendInput();
+        queueAndSendInput(true);
         return;
       }
-      if (e.key === "w" || e.key === "W") inputRef.current.up = true;
-      if (e.key === "s" || e.key === "S") inputRef.current.down = true;
-      if (e.key === "a" || e.key === "A") inputRef.current.left = true;
-      if (e.key === "d" || e.key === "D") inputRef.current.right = true;
+      if (e.key === "w" || e.key === "W") {
+        inputRef.current.up = true;
+        queueAndSendInput(true);
+      }
+      if (e.key === "s" || e.key === "S") {
+        inputRef.current.down = true;
+        queueAndSendInput(true);
+      }
+      if (e.key === "a" || e.key === "A") {
+        inputRef.current.left = true;
+        queueAndSendInput(true);
+      }
+      if (e.key === "d" || e.key === "D") {
+        inputRef.current.right = true;
+        queueAndSendInput(true);
+      }
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
@@ -906,13 +1006,25 @@ export default function LockstepArenaPage() {
       if (e.code === "Space") {
         e.preventDefault();
         inputRef.current.shoot = false;
-        queueAndSendInput();
+        queueAndSendInput(true);
         return;
       }
-      if (e.key === "w" || e.key === "W") inputRef.current.up = false;
-      if (e.key === "s" || e.key === "S") inputRef.current.down = false;
-      if (e.key === "a" || e.key === "A") inputRef.current.left = false;
-      if (e.key === "d" || e.key === "D") inputRef.current.right = false;
+      if (e.key === "w" || e.key === "W") {
+        inputRef.current.up = false;
+        queueAndSendInput(true);
+      }
+      if (e.key === "s" || e.key === "S") {
+        inputRef.current.down = false;
+        queueAndSendInput(true);
+      }
+      if (e.key === "a" || e.key === "A") {
+        inputRef.current.left = false;
+        queueAndSendInput(true);
+      }
+      if (e.key === "d" || e.key === "D") {
+        inputRef.current.right = false;
+        queueAndSendInput(true);
+      }
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -1138,20 +1250,20 @@ export default function LockstepArenaPage() {
                   (e.target as HTMLCanvasElement).setPointerCapture?.(e.pointerId);
                   inputRef.current.shoot = true;
                   warnIfGunDryFire();
-                  queueAndSendInput();
+                  queueAndSendInput(true);
                 }}
                 onPointerUp={(e) => {
                   e.preventDefault();
                   inputRef.current.shoot = false;
-                  queueAndSendInput();
+                  queueAndSendInput(true);
                 }}
                 onPointerCancel={(e) => {
                   inputRef.current.shoot = false;
-                  queueAndSendInput();
+                  queueAndSendInput(true);
                 }}
                 onPointerLeave={() => {
                   inputRef.current.shoot = false;
-                  queueAndSendInput();
+                  queueAndSendInput(true);
                 }}
               />
               <div ref={announceAnchorRef} className="arena-announce-mount" aria-hidden />
