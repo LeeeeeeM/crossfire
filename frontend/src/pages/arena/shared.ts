@@ -1,3 +1,15 @@
+import type {
+  WsBulletPayload,
+  WsDropPayload,
+  WsExplosionPayload,
+  WsKnifeArcPayload,
+  WsPlayerPayload,
+  WsRoomMetaPayload,
+  WsWorldPayload
+} from "../../../../shared/ws-protocol";
+import { WS_ROOM_STATUS } from "../../../../shared/ws-protocol";
+import { ITEM, type ItemType } from "../../../../shared/items";
+
 export type NetInput = {
   up: boolean;
   down: boolean;
@@ -10,76 +22,21 @@ export type NetInput = {
   slot: number;
 };
 
-export type Player = {
-  id: string;
-  name: string;
-  color: string;
-  x: number;
-  y: number;
-  hp: number;
-  dir: number;
-  alive: boolean;
-  respawnAt: number;
-  cooldown: number;
-  prevShoot: boolean;
-  deaths: number;
-  lastProcessedInputSeq: number;
-  weapons?: Array<{ t: string; q: number } | null>;
-  items?: Array<{ t: string; q: number } | null>;
-  reloadEndFrame?: number;
-  reloadStartFrame?: number;
-  reloadSlotIdx?: number;
-};
+export type Player = WsPlayerPayload;
 
-export type Drop = {
-  id: string;
-  t: string;
-  x: number;
-  y: number;
-  q: number;
-};
+export type Drop = WsDropPayload;
 
-export type Bullet = {
-  id: string;
-  owner: string;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  ttl: number;
-};
+export type Bullet = WsBulletPayload;
 
-export type Explosion = {
-  x: number;
-  y: number;
-  born: number;
-};
+export type Explosion = WsExplosionPayload;
 
-export type KnifeArcFx = {
-  x: number;
-  y: number;
-  dir: number;
-  born: number;
-};
+export type KnifeArcFx = WsKnifeArcPayload;
 
-export type Obstacle = { x: number; y: number; w: number; h: number };
+export type Obstacle = WsWorldPayload["obstacles"][number];
 
-export type World = {
-  width: number;
-  height: number;
-  obstacles: Obstacle[];
-  reloadDurationFrames?: number;
-  explosionFxFrames?: number;
-  bulletSpawnOffset?: number;
-};
+export type World = WsWorldPayload;
 
-export type RoomMeta = {
-  id: string;
-  ownerKey: string;
-  status: "idle" | "waiting" | "started";
-  playerCount: number;
-  maxPlayers: number;
-};
+export type RoomMeta = WsRoomMetaPayload;
 
 export const VIEW_W = 980;
 export const VIEW_H = 620;
@@ -102,26 +59,26 @@ export const DEFAULT_EXPLOSION_FX_FRAMES = 15;
 export const DEFAULT_BULLET_SPAWN_OFFSET = 20;
 export const DEFAULT_RELOAD_DURATION_FRAMES = 45;
 
-export const ITEM_LABELS: Record<string, string> = {
-  knife: "匕首",
-  bandage: "绷带",
-  ammo_9mm: "9mm",
-  ammo_762: "7.62",
-  armor_light: "轻甲",
-  armor_mid: "中甲",
-  armor_heavy: "重甲",
-  boots_light: "轻鞋",
-  boots_mid: "中鞋",
-  boots_heavy: "重鞋",
-  gun_smg_9mm: "SMG(9)",
-  gun_ar_762: "AR(7.62)",
-  gun_ak_762: "AK(7.62)",
-  gun_sniper_762: "Sniper(7.62)",
-  gun_m9_9mm: "M9(9)"
+export const ITEM_LABELS: Record<ItemType, string> = {
+  [ITEM.knife]: "匕首",
+  [ITEM.bandage]: "绷带",
+  [ITEM.ammo9mm]: "9mm",
+  [ITEM.ammo762]: "7.62",
+  [ITEM.armorLight]: "轻甲",
+  [ITEM.armorMid]: "中甲",
+  [ITEM.armorHeavy]: "重甲",
+  [ITEM.bootsLight]: "轻鞋",
+  [ITEM.bootsMid]: "中鞋",
+  [ITEM.bootsHeavy]: "重鞋",
+  [ITEM.gunSmg9mm]: "SMG(9)",
+  [ITEM.gunAr762]: "AR(7.62)",
+  [ITEM.gunAk762]: "AK(7.62)",
+  [ITEM.gunSniper762]: "Sniper(7.62)",
+  [ITEM.gunM99mm]: "M9(9)"
 };
 
 export function itemLabel(t: string) {
-  return ITEM_LABELS[t] || t;
+  return (ITEM_LABELS as Record<string, string>)[t] || t;
 }
 
 export function clamp(v: number, min: number, max: number) {
@@ -153,7 +110,12 @@ export function parseRoom(raw: any): RoomMeta | null {
   return {
     id: String(raw.room.id),
     ownerKey: String(raw.room.ownerKey || ""),
-    status: raw.room.status === "started" ? "started" : raw.room.status === "waiting" ? "waiting" : "idle",
+    status:
+      raw.room.status === WS_ROOM_STATUS.started
+        ? WS_ROOM_STATUS.started
+        : raw.room.status === WS_ROOM_STATUS.waiting
+          ? WS_ROOM_STATUS.waiting
+          : WS_ROOM_STATUS.idle,
     playerCount: Number(raw.room.playerCount || 0),
     maxPlayers: Number(raw.room.maxPlayers || DEFAULT_ROOM_MAX_PLAYERS)
   };
@@ -166,7 +128,12 @@ export function parseRooms(raw: any): RoomMeta[] {
       .map((x: any) => ({
         id: String(x.id),
         ownerKey: String(x.ownerKey || ""),
-        status: x.status === "started" ? "started" : x.status === "waiting" ? "waiting" : "idle",
+        status:
+          x.status === WS_ROOM_STATUS.started
+            ? WS_ROOM_STATUS.started
+            : x.status === WS_ROOM_STATUS.waiting
+              ? WS_ROOM_STATUS.waiting
+              : WS_ROOM_STATUS.idle,
         playerCount: Number(x.playerCount || 0),
         maxPlayers: Number(x.maxPlayers || DEFAULT_ROOM_MAX_PLAYERS)
       }));

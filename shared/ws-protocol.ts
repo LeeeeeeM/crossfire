@@ -62,7 +62,20 @@ export function wsRoomReason(prefix: string, playerKey: string) {
   return `${prefix}_${playerKey}`;
 }
 
-export type WsRoomStatus = "idle" | "waiting" | "started";
+export const WS_ROOM_STATUS = {
+  idle: "idle",
+  waiting: "waiting",
+  started: "started"
+} as const;
+
+export type WsRoomStatus = (typeof WS_ROOM_STATUS)[keyof typeof WS_ROOM_STATUS];
+
+export const WS_ITEM_SECTION = {
+  weapon: "weapon",
+  item: "item"
+} as const;
+
+export type WsItemSection = (typeof WS_ITEM_SECTION)[keyof typeof WS_ITEM_SECTION];
 
 export type WsRoomMetaPayload = {
   id: string;
@@ -176,7 +189,12 @@ export type WsClientInputMessage = {
   slot: number;
 };
 export type WsClientPickupMessage = { type: (typeof WS_CLIENT_MSG)["pickup"]; dropId: string };
-export type WsClientDropItemMessage = { type: (typeof WS_CLIENT_MSG)["dropItem"]; slotIdx: number; section?: "weapon" | "item"; qty?: number };
+export type WsClientDropItemMessage = {
+  type: (typeof WS_CLIENT_MSG)["dropItem"];
+  slotIdx: number;
+  section?: WsItemSection;
+  qty?: number;
+};
 
 export type WsClientMessage =
   | WsClientAuthMessage

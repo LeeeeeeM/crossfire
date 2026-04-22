@@ -5,15 +5,19 @@ import { useSystemAnnouncer } from "../components/SystemAnnouncer";
 import {
   isWsServerMessage,
   WS_CLIENT_MSG,
+  WS_ITEM_SECTION,
   WS_REJECT_REASON,
   WS_ROOM_EVENT,
+  WS_ROOM_STATUS,
   WS_SERVER_MSG,
   type WsClientInputMessage,
   type WsClientMessage,
   type WsServerLobbyStateMessage,
   type WsServerMessage,
+  type WsItemSection,
   type WsStateMessage
 } from "../../../shared/ws-protocol";
+import { ITEM, isAmmoItemType, isArmorItemType, isBootsItemType, isGunItemType } from "../../../shared/items";
 import {
   DEFAULT_BULLET_SPAWN_OFFSET,
   DEFAULT_EXPLOSION_FX_FRAMES,
@@ -124,7 +128,7 @@ export default function LockstepArenaPage() {
   const [selectedWeaponIdx, setSelectedWeaponIdx] = useState<number>(0);
   const selectedWeaponIdxRef = useRef(0);
   const [selectedItemIdx, setSelectedItemIdx] = useState<number>(0);
-  const [activeSection, setActiveSection] = useState<"weapon" | "item">("weapon");
+  const [activeSection, setActiveSection] = useState<WsItemSection>(WS_ITEM_SECTION.weapon);
   useEffect(() => {
     selectedWeaponIdxRef.current = selectedWeaponIdx;
     inputRef.current.slot = selectedWeaponIdx;
@@ -163,14 +167,14 @@ export default function LockstepArenaPage() {
     setInvTick((t) => t + 1);
     setSelectedWeaponIdx(0);
     setSelectedItemIdx(0);
-    setActiveSection("weapon");
+    setActiveSection(WS_ITEM_SECTION.weapon);
   };
 
   const inRoom = !!selfIdRef.current && playersRef.current.has(selfIdRef.current);
-  const inWaitingRoom = inRoom && roomMeta?.status === "waiting";
-  const inStartedRoom = inRoom && roomMeta?.status === "started";
+  const inWaitingRoom = inRoom && roomMeta?.status === WS_ROOM_STATUS.waiting;
+  const inStartedRoom = inRoom && roomMeta?.status === WS_ROOM_STATUS.started;
   const isOwner = !!roomMeta && roomMeta.ownerKey === selfIdRef.current;
-  const canStartGame = !!roomMeta && roomMeta.status === "waiting" && isOwner && roomMeta.playerCount >= 1;
+  const canStartGame = !!roomMeta && roomMeta.status === WS_ROOM_STATUS.waiting && isOwner && roomMeta.playerCount >= 1;
   const showGame = inStartedRoom;
 
   useLayoutEffect(() => {
@@ -228,7 +232,7 @@ export default function LockstepArenaPage() {
     if (!me?.weapons) return;
     const slot = me.weapons[selectedWeaponIdxRef.current];
     const t = slot?.t;
-    if (!t || !t.startsWith("gun_")) return;
+    if (!t || !isGunItemType(t)) return;
     const rounds = slot?.q ?? 0;
     if (rounds > 0) return;
     lastNoAmmoHintAtRef.current = now;
@@ -515,7 +519,7 @@ export default function LockstepArenaPage() {
         selfIdRef.current = msg.id;
         tickMsRef.current = Number(msg.tickMs || DEFAULT_TICK_MS);
         applyState(msg.snapshot);
-        const started = msg?.snapshot?.room?.status === "started";
+        const started = msg?.snapshot?.room?.status === WS_ROOM_STATUS.started;
         setStatus(started ? "游戏开始" : "已加入房间，等待开始");
         announce({ title: started ? "战局开始" : "已加入房间", subtitle: started ? "祝你好运" : "等待房主开局", tone: "info", durationMs: 1200 });
         return;
@@ -589,20 +593,20 @@ export default function LockstepArenaPage() {
       const digit = e.key;
       if (digit >= "1" && digit <= "3" && digit.length === 1) {
         setSelectedWeaponIdx(Number(digit) - 1);
-        setActiveSection("weapon");
+        setActiveSection(WS_ITEM_SECTION.weapon);
         e.preventDefault();
         return;
       }
       if (digit >= "4" && digit <= "8" && digit.length === 1) {
         setSelectedItemIdx(Number(digit) - 4);
-        setActiveSection("item");
+        setActiveSection(WS_ITEM_SECTION.item);
         e.preventDefault();
         return;
       }
       const key = e.key.toLowerCase();
       if (key === "q") {
         setSelectedWeaponIdx((x) => (x + 1) % WEAPON_SLOT_SIZE);
-        setActiveSection("weapon");
+        setActiveSection(WS_ITEM_SECTION.weapon);
         e.preventDefault();
         return;
       }
@@ -623,16 +627,16 @@ export default function LockstepArenaPage() {
       }
       if (key === "g") {
         const me = playersRef.current.get(selfIdRef.current);
-        const slot = activeSection === "weapon" ? me?.weapons?.[selectedWeaponIdx] : me?.items?.[selectedItemIdx];
+        const slot = activeSection === WS_ITEM_SECTION.weapon ? me?.weapons?.[selectedWeaponIdx] : me?.items?.[selectedItemIdx];
         if (!slot) return;
-        if (slot.t === "knife") {
+        if (slot.t === ITEM.knife) {
           announce({ title: "无法丢弃", subtitle: "匕首为默认物品", tone: "bad", durationMs: 1200 });
           return;
         }
         sendWs({
           type: WS_CLIENT_MSG.dropItem,
           section: activeSection,
-          slotIdx: activeSection === "weapon" ? selectedWeaponIdx : selectedItemIdx
+          slotIdx: activeSection === WS_ITEM_SECTION.weapon ? selectedWeaponIdx : selectedItemIdx
         });
       }
     };
@@ -771,13 +775,13 @@ export default function LockstepArenaPage() {
 
       // drops (world space)
       for (const d of dropsRef.current) {
-        const tone = d.t.startsWith("gun_")
+        const tone = isGunItemType(d.t)
           ? "#fbbf24"
-          : d.t.startsWith("armor_")
+          : isArmorItemType(d.t)
             ? "#60a5fa"
-            : d.t.startsWith("boots_")
+            : isBootsItemType(d.t)
               ? "#a78bfa"
-              : d.t.startsWith("ammo_")
+              : isAmmoItemType(d.t)
                 ? "#34d399"
                 : "#19d3ff";
         ctx.fillStyle = tone;
@@ -1194,7 +1198,7 @@ export default function LockstepArenaPage() {
                 <div className="muted">武器栏</div>
                 <div className="inv-grid">
                   {weaponSlots.map((s, idx) => {
-                    const active = activeSection === "weapon" && idx === selectedWeaponIdx;
+                    const active = activeSection === WS_ITEM_SECTION.weapon && idx === selectedWeaponIdx;
                     const cls = active ? "inv-slot active" : "inv-slot";
                     return (
                       <button
@@ -1203,7 +1207,7 @@ export default function LockstepArenaPage() {
                         className={cls}
                         onClick={() => {
                           setSelectedWeaponIdx(idx);
-                          setActiveSection("weapon");
+                          setActiveSection(WS_ITEM_SECTION.weapon);
                         }}
                         aria-pressed={active}
                       >
@@ -1216,7 +1220,7 @@ export default function LockstepArenaPage() {
                 <div className="muted" style={{ marginTop: 8 }}>物品栏</div>
                 <div className="inv-grid">
                   {itemSlots.map((s, idx) => {
-                    const active = activeSection === "item" && idx === selectedItemIdx;
+                    const active = activeSection === WS_ITEM_SECTION.item && idx === selectedItemIdx;
                     const cls = active ? "inv-slot active" : "inv-slot";
                     return (
                       <button
@@ -1225,7 +1229,7 @@ export default function LockstepArenaPage() {
                         className={cls}
                         onClick={() => {
                           setSelectedItemIdx(idx);
-                          setActiveSection("item");
+                          setActiveSection(WS_ITEM_SECTION.item);
                         }}
                         aria-pressed={active}
                       >

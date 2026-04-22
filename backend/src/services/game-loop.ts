@@ -2,7 +2,8 @@ import { applyKnifeMelee } from "./combat-service";
 import { clearReloadState, gunStat, isGunItem, tryCompleteReload, tryStartAutoReload, tryStartManualReload } from "./inventory-service";
 import { pickDropLootByRatio, resolveDropQty } from "../data/drop-loot-table";
 import type { RoomPlayer, RoomState } from "../models/server-types";
-import { WS_ROOM_EVENT, WS_STATE_TYPE, wsRoomReason } from "../../../shared/ws-protocol";
+import { ITEM } from "../../../shared/items";
+import { WS_ROOM_EVENT, WS_ROOM_STATUS, WS_STATE_TYPE, wsRoomReason } from "../../../shared/ws-protocol";
 
 type GameLoopContext = {
   tickMs: number;
@@ -47,7 +48,7 @@ export function startGameLoop(ctx: GameLoopContext) {
   return setInterval(() => {
     const now = Date.now();
     for (const room of ctx.rooms.values()) {
-      if (room.status !== "started") continue;
+      if (room.status !== WS_ROOM_STATUS.started) continue;
 
       room.frame += 1;
 
@@ -145,7 +146,7 @@ export function startGameLoop(ctx: GameLoopContext) {
           tryStartManualReload(p, room, selIdx);
         }
         if (shootEdge && p.cooldown <= 0 && selWeapon) {
-          if (selWeapon.t === "knife") {
+          if (selWeapon.t === ITEM.knife) {
             applyKnifeMelee(p, room, ids, clearReloadState);
             room.knifeArcs.push({
               x: p.x,

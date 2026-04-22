@@ -1,4 +1,7 @@
 import type { Obstacle } from "../data/game-data";
+import type { ItemType } from "../../../shared/items";
+import type { WsRoomStatus } from "../../../shared/ws-protocol";
+export type { ItemType } from "../../../shared/items";
 
 export type InputState = {
   up: boolean;
@@ -11,23 +14,6 @@ export type InputState = {
   aimY: number;
   slot: number;
 };
-
-export type ItemType =
-  | "knife"
-  | "bandage"
-  | "ammo_9mm"
-  | "ammo_762"
-  | "armor_light"
-  | "armor_mid"
-  | "armor_heavy"
-  | "boots_light"
-  | "boots_mid"
-  | "boots_heavy"
-  | "gun_smg_9mm"
-  | "gun_ar_762"
-  | "gun_ak_762"
-  | "gun_sniper_762"
-  | "gun_m9_9mm";
 
 export type InventorySlot = {
   t: ItemType;
@@ -91,7 +77,7 @@ export type KnifeArcFx = {
   born: number;
 };
 
-export type RoomStatus = "idle" | "waiting" | "started";
+export type RoomStatus = WsRoomStatus;
 
 export type WsData = {
   connId: string;

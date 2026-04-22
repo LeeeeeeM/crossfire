@@ -1,5 +1,5 @@
 import type { InputState, InventorySlot, RoomMeta, RoomPlayer, RoomState } from "../models/server-types";
-import { WS_REJECT_REASON, WS_ROOM_EVENT, WS_STATE_TYPE } from "../../../shared/ws-protocol";
+import { WS_REJECT_REASON, WS_ROOM_EVENT, WS_ROOM_STATUS, WS_STATE_TYPE } from "../../../shared/ws-protocol";
 
 type CreateRoomServiceContext = {
   rooms: Map<string, RoomState>;
@@ -145,7 +145,7 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
     const room: RoomState = {
       id,
       ownerKey,
-      status: "waiting",
+      status: WS_ROOM_STATUS.waiting,
       createdAt: Date.now(),
       frame: 0,
       bulletSeq: 1,
@@ -175,11 +175,11 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
   }
 
   function startRoomBy(room: RoomState, ownerKey: string): StartRoomResult {
-    if (room.status !== "waiting") return { ok: false, reason: WS_REJECT_REASON.alreadyStarted };
+    if (room.status !== WS_ROOM_STATUS.waiting) return { ok: false, reason: WS_REJECT_REASON.alreadyStarted };
     if (room.ownerKey !== ownerKey) return { ok: false, reason: WS_REJECT_REASON.notOwner };
     if (room.players.size < 1) return { ok: false, reason: WS_REJECT_REASON.emptyRoom };
 
-    room.status = "started";
+    room.status = WS_ROOM_STATUS.started;
     room.frame = 0;
     room.bullets = [];
     room.explosions = [];

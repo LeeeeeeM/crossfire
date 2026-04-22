@@ -1,11 +1,14 @@
 import type { ServerWebSocket } from "bun";
 import type { InventorySlot, ItemType, RoomPlayer, RoomState, WsData } from "../models/server-types";
+import { isAmmoItemType } from "../../../shared/items";
 import { fallbackPlayerName, isValidPlayerKey, isValidPlayerName } from "../config/validation-config";
 import {
   isWsClientMessage,
   WS_CLIENT_MSG,
+  WS_ITEM_SECTION,
   WS_REJECT_REASON,
   WS_ROOM_EVENT,
+  WS_ROOM_STATUS,
   WS_ROOM_WELCOME_REASON,
   WS_SERVER_MSG,
   wsRoomReason,
@@ -51,8 +54,6 @@ type WsHandlerContext = {
   removeItemAt: (items: Array<InventorySlot | null>, idx: number, qty?: number) => InventorySlot | null;
 };
 
-const AMMO_PICKUP_TYPES = new Set<ItemType>(["ammo_9mm", "ammo_762"]);
-
 function sendJson(ws: ServerWebSocket<WsData>, data: unknown) {
   ws.send(JSON.stringify(data));
 }
@@ -66,7 +67,7 @@ function sendReject(
 }
 
 function isAmmoPickupType(itemType: ItemType) {
-  return AMMO_PICKUP_TYPES.has(itemType);
+  return isAmmoItemType(itemType);
 }
 
 export function makeWebSocketHandlers(ctx: WsHandlerContext) {
@@ -202,7 +203,7 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
       }
 
       if (msg.type === WS_CLIENT_MSG.input) {
-        if (!room || room.status !== "started") return;
+        if (!room || room.status !== WS_ROOM_STATUS.started) return;
 
         const seq = Number(msg.seq);
         if (!Number.isFinite(seq) || seq <= p.lastProcessedInputSeq) return;
@@ -223,7 +224,7 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
       }
 
       if (msg.type === WS_CLIENT_MSG.pickup) {
-        if (!room || room.status !== "started") return;
+        if (!room || room.status !== WS_ROOM_STATUS.started) return;
         const dropId = String(msg.dropId).trim();
         const dropIdx = room.drops.findIndex((d) => d.id === dropId);
         if (dropIdx < 0) return;
@@ -253,13 +254,13 @@ export function makeWebSocketHandlers(ctx: WsHandlerContext) {
       }
 
       if (msg.type === WS_CLIENT_MSG.dropItem) {
-        if (!room || room.status !== "started") return;
+        if (!room || room.status !== WS_ROOM_STATUS.started) return;
         const idx = Number(msg.slotIdx);
-        const section = msg.section === "item" ? "item" : "weapon";
-        const slotCap = section === "weapon" ? ctx.weaponSlotSize : ctx.itemSlotSize;
+        const section = msg.section === WS_ITEM_SECTION.item ? WS_ITEM_SECTION.item : WS_ITEM_SECTION.weapon;
+        const slotCap = section === WS_ITEM_SECTION.weapon ? ctx.weaponSlotSize : ctx.itemSlotSize;
         if (!Number.isFinite(idx) || idx < 0 || idx >= slotCap) return;
         const removed =
-          section === "weapon"
+          section === WS_ITEM_SECTION.weapon
             ? ctx.removeWeaponAt(p.weapons, idx, Number(msg.qty || 0) || undefined)
             : ctx.removeItemAt(p.items, idx, Number(msg.qty || 0) || undefined);
         if (!removed) {

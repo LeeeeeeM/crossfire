@@ -1,4 +1,5 @@
 import { SERVER_CONSTANTS } from "../config/game-constants";
+import { ITEM } from "../../../shared/items";
 import {
   AMMO_ITEMS,
   AMMO_TO_GUNS,
@@ -93,7 +94,7 @@ export function addPickup(weapons: Array<InventorySlot | null>, items: Array<Inv
 export function removeWeaponAt(weapons: Array<InventorySlot | null>, idx: number, qty?: number) {
   const s = weapons[idx];
   if (!s) return null;
-  if (s.t === "knife") return null;
+  if (s.t === ITEM.knife) return null;
   const take = Math.max(1, Math.min(qty ?? s.q, s.q));
   s.q -= take;
   const ret: InventorySlot = { t: s.t, q: take };
@@ -208,7 +209,7 @@ export function tryStartManualReload(p: RoomPlayer, room: RoomState, gunSlotIdx:
 
 export function initialWeapons() {
   const out: Array<InventorySlot | null> = Array.from({ length: WEAPON_SLOT_SIZE }, () => null);
-  out[0] = { t: "knife", q: 1 };
+  out[0] = { t: ITEM.knife, q: 1 };
   return out;
 }
 
