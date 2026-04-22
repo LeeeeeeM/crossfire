@@ -73,19 +73,150 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
     }));
   }
 
+  function playerSig(p: RoomPlayer) {
+    return [
+      p.name,
+      p.color,
+      p.x,
+      p.y,
+      p.hp,
+      p.dir,
+      p.alive ? 1 : 0,
+      p.respawnAt,
+      p.cooldown,
+      p.prevShoot ? 1 : 0,
+      p.prevReload ? 1 : 0,
+      p.deaths,
+      p.lastProcessedInputSeq,
+      JSON.stringify(p.weapons),
+      JSON.stringify(p.items),
+      p.reloadEndFrame || 0,
+      p.reloadStartFrame || 0,
+      p.reloadSlotIdx ?? -1
+    ].join("|");
+  }
+
+  function playersDeltaPayload(room: RoomState) {
+    const changed: ReturnType<typeof playersPayload> = [];
+    const live = new Set<string>();
+    for (const p of room.players.values()) {
+      live.add(p.id);
+      const sig = playerSig(p);
+      if (room.playerDeltaCache.get(p.id) === sig) continue;
+      room.playerDeltaCache.set(p.id, sig);
+      changed.push({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        x: p.x,
+        y: p.y,
+        hp: p.hp,
+        dir: p.dir,
+        alive: p.alive,
+        respawnAt: p.respawnAt,
+        cooldown: p.cooldown,
+        prevShoot: p.prevShoot,
+        prevReload: p.prevReload,
+        deaths: p.deaths,
+        lastProcessedInputSeq: p.lastProcessedInputSeq,
+        weapons: p.weapons,
+        items: p.items,
+        reloadEndFrame: p.reloadEndFrame || 0,
+        reloadStartFrame: p.reloadStartFrame || 0,
+        reloadSlotIdx: p.reloadSlotIdx ?? -1
+      });
+    }
+    for (const id of room.playerDeltaCache.keys()) {
+      if (!live.has(id)) room.playerDeltaCache.delete(id);
+    }
+    return changed;
+  }
+
+  function bulletSig(b: RoomState["bullets"][number]) {
+    return [b.owner, b.x, b.y, b.vx, b.vy, b.ttl, b.damage].join("|");
+  }
+
+  function bulletsDeltaPayload(room: RoomState) {
+    const changed = [] as RoomState["bullets"];
+    const removed: string[] = [];
+    const live = new Set<string>();
+    for (const b of room.bullets) {
+      live.add(b.id);
+      const sig = bulletSig(b);
+      if (room.bulletDeltaCache.get(b.id) === sig) continue;
+      room.bulletDeltaCache.set(b.id, sig);
+      changed.push(b);
+    }
+    for (const id of room.bulletDeltaCache.keys()) {
+      if (!live.has(id)) {
+        room.bulletDeltaCache.delete(id);
+        removed.push(id);
+      }
+    }
+    return { changed, removed };
+  }
+
+  function dropSig(d: RoomState["drops"][number]) {
+    return [d.t, d.x, d.y, d.q, d.born].join("|");
+  }
+
+  function dropsDeltaPayload(room: RoomState) {
+    const changed = [] as RoomState["drops"];
+    const removed: string[] = [];
+    const live = new Set<string>();
+    for (const d of room.drops) {
+      live.add(d.id);
+      const sig = dropSig(d);
+      if (room.dropDeltaCache.get(d.id) === sig) continue;
+      room.dropDeltaCache.set(d.id, sig);
+      changed.push(d);
+    }
+    for (const id of room.dropDeltaCache.keys()) {
+      if (!live.has(id)) {
+        room.dropDeltaCache.delete(id);
+        removed.push(id);
+      }
+    }
+    return { changed, removed };
+  }
+
   function statePayload(room: RoomState, type: (typeof WS_STATE_TYPE)[keyof typeof WS_STATE_TYPE], reason?: string) {
-    const payload = {
+    const payload: Record<string, unknown> = {
       type,
       reason,
       frame: room.frame,
       serverTime: Date.now(),
       room: roomMeta(room),
-      players: playersPayload(room),
-      bullets: room.bullets,
       explosions: room.explosions,
       knifeArcs: room.knifeArcs,
-      drops: room.drops
     };
+    if (type === WS_STATE_TYPE.snapshot) {
+      const players = playersPayload(room);
+      payload.players = players;
+      payload.bullets = room.bullets;
+      payload.drops = room.drops;
+      room.playerDeltaCache.clear();
+      for (const p of room.players.values()) {
+        room.playerDeltaCache.set(p.id, playerSig(p));
+      }
+      room.bulletDeltaCache.clear();
+      for (const b of room.bullets) {
+        room.bulletDeltaCache.set(b.id, bulletSig(b));
+      }
+      room.dropDeltaCache.clear();
+      for (const d of room.drops) {
+        room.dropDeltaCache.set(d.id, dropSig(d));
+      }
+    } else {
+      const playersDelta = playersDeltaPayload(room);
+      if (playersDelta.length > 0) payload.playersDelta = playersDelta;
+      const bulletsDelta = bulletsDeltaPayload(room);
+      if (bulletsDelta.changed.length > 0) payload.bulletsDelta = bulletsDelta.changed;
+      if (bulletsDelta.removed.length > 0) payload.bulletsRemovedIds = bulletsDelta.removed;
+      const dropsDelta = dropsDeltaPayload(room);
+      if (dropsDelta.changed.length > 0) payload.dropsDelta = dropsDelta.changed;
+      if (dropsDelta.removed.length > 0) payload.dropsRemovedIds = dropsDelta.removed;
+    }
     if (type === WS_STATE_TYPE.snapshot) {
       return {
         ...payload,
@@ -156,7 +287,10 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
       explosions: [],
       knifeArcs: [],
       offlineDeadlines: new Map(),
-      drops: []
+      drops: [],
+      playerDeltaCache: new Map(),
+      bulletDeltaCache: new Map(),
+      dropDeltaCache: new Map()
     };
     ctx.rooms.set(id, room);
     return room;
@@ -185,6 +319,9 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
     room.explosions = [];
     room.knifeArcs = [];
     room.drops = [];
+    room.playerDeltaCache.clear();
+    room.bulletDeltaCache.clear();
+    room.dropDeltaCache.clear();
     room.dropSeq = 1;
     room.nextDropAt = ctx.dropIntervalFrames;
 
@@ -214,6 +351,7 @@ export function createRoomService(ctx: CreateRoomServiceContext) {
     const existed = room.players.delete(playerKey);
     room.offlineDeadlines.delete(playerKey);
     ctx.playerToRoom.delete(playerKey);
+    room.playerDeltaCache.delete(playerKey);
     if (!existed) return;
 
     room.bullets = room.bullets.filter((b) => b.owner !== playerKey);

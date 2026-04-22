@@ -130,11 +130,16 @@ export type WsStateMessage = {
   serverTime: number;
   room: WsRoomMetaPayload;
   world?: WsWorldPayload;
-  players: WsPlayerPayload[];
-  bullets: WsBulletPayload[];
+  players?: WsPlayerPayload[];
+  playersDelta?: WsPlayerPayload[];
+  bullets?: WsBulletPayload[];
+  bulletsDelta?: WsBulletPayload[];
+  bulletsRemovedIds?: string[];
   explosions: WsExplosionPayload[];
   knifeArcs: WsKnifeArcPayload[];
-  drops: WsDropPayload[];
+  drops?: WsDropPayload[];
+  dropsDelta?: WsDropPayload[];
+  dropsRemovedIds?: string[];
 };
 
 export type WsServerRejectMessage = {

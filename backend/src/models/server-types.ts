@@ -110,6 +110,9 @@ export type RoomState = {
   knifeArcs: KnifeArcFx[];
   offlineDeadlines: Map<string, number>;
   drops: Drop[];
+  playerDeltaCache: Map<string, string>;
+  bulletDeltaCache: Map<string, string>;
+  dropDeltaCache: Map<string, string>;
 };
 
 export type { Obstacle };

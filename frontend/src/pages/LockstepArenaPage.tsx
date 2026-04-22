@@ -61,6 +61,7 @@ function sameRoomMeta(a: RoomMeta | null, b: RoomMeta | null) {
 
 const INPUT_MAX_SEND_HZ = 15;
 const INPUT_MIN_SEND_INTERVAL_MS = Math.round(1000 / INPUT_MAX_SEND_HZ);
+const INPUT_HOLD_HEARTBEAT_MS = 100;
 
 export default function LockstepArenaPage() {
   const navigate = useNavigate();
@@ -110,6 +111,7 @@ export default function LockstepArenaPage() {
   const pendingInputRef = useRef<NetInput | null>(null);
   const pendingInputSigRef = useRef("");
   const pendingInputTimerRef = useRef(0);
+  const mouseMovedSinceLastSendRef = useRef(false);
   const aimInitializedRef = useRef(false);
   const roomMetaRef = useRef<RoomMeta | null>(null);
   const selfInvSigRef = useRef("");
@@ -165,6 +167,7 @@ export default function LockstepArenaPage() {
     inputSeqRef.current = 0;
     lastSentInputSigRef.current = "";
     lastSentInputAtRef.current = 0;
+    mouseMovedSinceLastSendRef.current = false;
     pendingInputRef.current = null;
     pendingInputSigRef.current = "";
     if (pendingInputTimerRef.current) {
@@ -231,9 +234,25 @@ export default function LockstepArenaPage() {
       inputRef.current.aimY = camY + mouseVp.y * view.h;
 
       const input: NetInput = { ...inputRef.current, slot: selectedWeaponIdxRef.current };
-      const sig = JSON.stringify(input);
       const now = performance.now();
       const elapsed = now - lastSentInputAtRef.current;
+      const hasActiveControl = input.up || input.down || input.left || input.right || input.shoot || input.reload;
+      const includeAimInSig = immediate || hasActiveControl || mouseMovedSinceLastSendRef.current;
+      const sig = includeAimInSig
+        ? JSON.stringify({
+            ...input,
+            aimX: Math.round(input.aimX),
+            aimY: Math.round(input.aimY)
+          })
+        : JSON.stringify({
+            up: input.up,
+            down: input.down,
+            left: input.left,
+            right: input.right,
+            shoot: input.shoot,
+            reload: input.reload,
+            slot: input.slot
+          });
 
       const flush = (next: NetInput, nextSig: string) => {
         const ws = wsRef.current;
@@ -248,6 +267,7 @@ export default function LockstepArenaPage() {
         ws.send(JSON.stringify(payload));
         lastSentInputAtRef.current = performance.now();
         lastSentInputSigRef.current = nextSig;
+        mouseMovedSinceLastSendRef.current = false;
       };
 
       const schedulePending = (delayMs: number) => {
@@ -270,7 +290,11 @@ export default function LockstepArenaPage() {
         }, Math.max(0, delayMs));
       };
 
-      if (sig === lastSentInputSigRef.current) return;
+      if (sig === lastSentInputSigRef.current) {
+        if (!hasActiveControl) return;
+        const holdHeartbeatDue = elapsed >= INPUT_HOLD_HEARTBEAT_MS;
+        if (!holdHeartbeatDue) return;
+      }
       if (elapsed >= INPUT_MIN_SEND_INTERVAL_MS && immediate) {
         pendingInputRef.current = null;
         pendingInputSigRef.current = "";
@@ -409,40 +433,72 @@ export default function LockstepArenaPage() {
         };
       }
 
-      const next = new Map<string, Player>();
-      for (const p of msg.players) {
-        next.set(p.id, {
-          id: p.id,
-          name: p.name,
-          color: p.color,
-          x: Number(p.x || 0),
-          y: Number(p.y || 0),
-          hp: Number(p.hp ?? MAX_HP),
-          dir: Number(p.dir || 0),
-          alive: !!p.alive,
-          respawnAt: Number(p.respawnAt || 0),
-          cooldown: Number(p.cooldown || 0),
-          prevShoot: !!p.prevShoot,
-          deaths: Number(p.deaths || 0),
-          lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0),
-          weapons: Array.isArray(p.weapons)
-            ? (p.weapons as Array<{ t?: string; q?: number } | null>).map((slot) =>
-                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
-              )
-            : undefined,
-          items: Array.isArray(p.items)
-            ? (p.items as Array<{ t?: string; q?: number } | null>).map((slot) =>
-                slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
-              )
-            : undefined,
-          reloadEndFrame: Number(p.reloadEndFrame || 0),
-          reloadStartFrame: Number(p.reloadStartFrame || 0),
-          reloadSlotIdx: Number(p.reloadSlotIdx ?? -1)
-        });
+      const parsePlayer = (p: any): Player => ({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        x: Number(p.x || 0),
+        y: Number(p.y || 0),
+        hp: Number(p.hp ?? MAX_HP),
+        dir: Number(p.dir || 0),
+        alive: !!p.alive,
+        respawnAt: Number(p.respawnAt || 0),
+        cooldown: Number(p.cooldown || 0),
+        prevShoot: !!p.prevShoot,
+        deaths: Number(p.deaths || 0),
+        lastProcessedInputSeq: Number(p.lastProcessedInputSeq || 0),
+        weapons: Array.isArray(p.weapons)
+          ? (p.weapons as Array<{ t?: string; q?: number } | null>).map((slot) =>
+              slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
+            )
+          : undefined,
+        items: Array.isArray(p.items)
+          ? (p.items as Array<{ t?: string; q?: number } | null>).map((slot) =>
+              slot && slot.t ? { t: String(slot.t), q: Number(slot.q ?? 1) } : null
+            )
+          : undefined,
+        reloadEndFrame: Number(p.reloadEndFrame || 0),
+        reloadStartFrame: Number(p.reloadStartFrame || 0),
+        reloadSlotIdx: Number(p.reloadSlotIdx ?? -1)
+      });
+
+      let next = playersRef.current;
+      if (Array.isArray(msg.players)) {
+        next = new Map<string, Player>();
+        for (const p of msg.players) {
+          next.set(p.id, parsePlayer(p));
+        }
+      } else if (Array.isArray(msg.playersDelta) && msg.playersDelta.length > 0) {
+        next = new Map(playersRef.current);
+        for (const p of msg.playersDelta) {
+          const prev = next.get(p.id);
+          const merged = parsePlayer({
+            ...(prev || {}),
+            ...p,
+            weapons: Array.isArray((p as any).weapons) ? (p as any).weapons : prev?.weapons,
+            items: Array.isArray((p as any).items) ? (p as any).items : prev?.items
+          });
+          next.set(p.id, merged);
+        }
       }
 
       playersRef.current = next;
-      bulletsRef.current = Array.isArray(msg.bullets) ? msg.bullets : [];
+      if (Array.isArray(msg.bullets)) {
+        bulletsRef.current = msg.bullets;
+      } else {
+        let merged = bulletsRef.current;
+        if (Array.isArray(msg.bulletsDelta) && msg.bulletsDelta.length > 0) {
+          const map = new Map<string, Bullet>();
+          for (const b of merged) map.set(b.id, b);
+          for (const b of msg.bulletsDelta) map.set(String(b.id), b as Bullet);
+          merged = Array.from(map.values());
+        }
+        if (Array.isArray(msg.bulletsRemovedIds) && msg.bulletsRemovedIds.length > 0) {
+          const removed = new Set(msg.bulletsRemovedIds.map((x) => String(x)));
+          merged = merged.filter((b) => !removed.has(String(b.id)));
+        }
+        bulletsRef.current = merged;
+      }
       explosionsRef.current = Array.isArray(msg.explosions) ? msg.explosions : [];
       knifeArcsRef.current = Array.isArray(msg.knifeArcs)
         ? (msg.knifeArcs as KnifeArcFx[]).map((k) => ({
@@ -452,7 +508,22 @@ export default function LockstepArenaPage() {
             born: Number(k.born || 0)
           }))
         : [];
-      dropsRef.current = Array.isArray(msg.drops) ? msg.drops : [];
+      if (Array.isArray(msg.drops)) {
+        dropsRef.current = msg.drops;
+      } else {
+        let merged = dropsRef.current;
+        if (Array.isArray(msg.dropsDelta) && msg.dropsDelta.length > 0) {
+          const map = new Map<string, Drop>();
+          for (const d of merged) map.set(d.id, d);
+          for (const d of msg.dropsDelta) map.set(String(d.id), d as Drop);
+          merged = Array.from(map.values());
+        }
+        if (Array.isArray(msg.dropsRemovedIds) && msg.dropsRemovedIds.length > 0) {
+          const removed = new Set(msg.dropsRemovedIds.map((x) => String(x)));
+          merged = merged.filter((d) => !removed.has(String(d.id)));
+        }
+        dropsRef.current = merged;
+      }
 
       const f = Number(msg.frame || 0);
       localFrameRef.current = f;
@@ -531,6 +602,7 @@ export default function LockstepArenaPage() {
       pendingInputsRef.current = [];
       lastSentInputSigRef.current = "";
       lastSentInputAtRef.current = 0;
+      mouseMovedSinceLastSendRef.current = false;
       pendingInputRef.current = null;
       pendingInputSigRef.current = "";
       if (pendingInputTimerRef.current) {
@@ -1047,6 +1119,7 @@ export default function LockstepArenaPage() {
     // 存储鼠标在视口上的相对位置(0-1范围)
     mouseViewportRef.current.x = Math.max(0, Math.min(1, ((e.clientX - rect.left) * scaleX) / view.w));
     mouseViewportRef.current.y = Math.max(0, Math.min(1, ((e.clientY - rect.top) * scaleY) / view.h));
+    mouseMovedSinceLastSendRef.current = true;
   };
 
   const createRoom = () => {
